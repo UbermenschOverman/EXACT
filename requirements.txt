@@ -1,0 +1,13 @@
+# Core ML
+torch>=2.0.0
+transformers>=4.36.0
+accelerate>=0.25.0
+safetensors>=0.4.3
+sentencepiece>=0.1.99
+
+# Reasoning
+sympy>=1.12
+
+# Utils
+pyyaml>=5.1
+tqdm>=4.27
