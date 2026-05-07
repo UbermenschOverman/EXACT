@@ -24,6 +24,7 @@ class LLMWrapper:
             self.model_path,
             dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto" if torch.cuda.is_available() else None,
+            attn_implementation="eager",
             local_files_only=True,
             trust_remote_code=True
         )
@@ -31,16 +32,21 @@ class LLMWrapper:
         if not torch.cuda.is_available():
             self.model.to(self.device)
 
-    def generate(self, prompt: str, max_new_tokens=256):
+    def generate(self, prompt: str, max_new_tokens=256, **kwargs):
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+
+        gen_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": True,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
+        gen_kwargs.update(kwargs)
 
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9
+                **gen_kwargs
             )
 
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)

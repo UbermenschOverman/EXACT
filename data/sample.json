@@ -1,8 +1,26 @@
 [
     {
-        "question": "What is Ohm's law?"
+        "question": "What is Ohm's law?",
+        "answer": "V = IR"
     },
     {
-        "question": "Calculate current if V=10V and R=5 ohm."
+        "question": "Calculate current if V=10V and R=5 ohm.",
+        "answer": "2A"
+    },
+    {
+        "question": "A capacitor with C=0.01F is charged to V=100V. What is the stored energy?",
+        "answer": "50J"
+    },
+    {
+        "question": "Two resistors R1=10 ohm and R2=20 ohm are connected in series. What is the total resistance?",
+        "answer": "30Ω"
+    },
+    {
+        "question": "If a circuit has power P=100W and current I=5A, what is the voltage?",
+        "answer": "20V"
+    },
+    {
+        "question": "If all birds can fly and Tweety is a bird, then can Tweety fly?",
+        "answer": "Yes"
     }
 ]

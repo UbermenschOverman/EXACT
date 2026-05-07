@@ -1,7 +1,7 @@
 # src/data/schema.py
 
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
 
 
 @dataclass
@@ -23,10 +23,31 @@ class PhysicsSample(QASample):
 
 
 @dataclass
-class ModelOutput:
+class ReasoningOutput:
+    """Unified output schema for all reasoning types."""
     question: str
     answer: str
-    explanation: Optional[str]
-    fol: Optional[str]
-    proof: Optional[List[str]]
-    valid: bool
+    explanation: str = ""
+    reasoning_trace: List[Dict[str, Any]] = field(default_factory=list)
+    used_premises: List[str] = field(default_factory=list)
+    confidence: float = 0.0
+    question_type: str = "unknown"   # "logic" | "physics" | "definition" | "unknown"
+    valid: bool = False
+    verification: Optional[Dict[str, Any]] = None
+    attempt: int = 0
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "question": self.question,
+            "answer": self.answer,
+            "explanation": self.explanation,
+            "reasoning_trace": self.reasoning_trace,
+            "used_premises": self.used_premises,
+            "confidence": self.confidence,
+            "question_type": self.question_type,
+            "valid": self.valid,
+            "verification": self.verification,
+            "attempt": self.attempt,
+            "error": self.error,
+        }

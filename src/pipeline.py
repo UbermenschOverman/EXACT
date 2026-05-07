@@ -1,5 +1,10 @@
 # src/pipeline.py
 
+"""
+Pipeline orchestration — supports single-sample and batch modes.
+Connects LLM, orchestrator, and all solvers.
+"""
+
 import os
 from tqdm import tqdm
 
@@ -45,7 +50,8 @@ class Pipeline:
         self.orchestrator = Orchestrator(
             self.planner,
             self.translator,
-            self.explainer
+            self.explainer,
+            generator=generator,  # pass generator for classifier + premise extraction
         )
 
     def run(self, sample=None):
