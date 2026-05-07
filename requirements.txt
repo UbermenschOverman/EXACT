@@ -11,3 +11,6 @@ sympy>=1.12
 # Utils
 pyyaml>=5.1
 tqdm>=4.27
+
+# Testing
+pytest>=7.0.0

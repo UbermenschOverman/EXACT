@@ -117,17 +117,24 @@ def get_formula(formula_id: str) -> dict:
     return FORMULA_BANK.get(formula_id)
 
 
-def detect_formula(question: str) -> str:
+def detect_formula(question: str, known_vars: dict = None) -> str:
     """
-    Detect which formula to use based on keywords in the question.
+    Detect which formula to use based on keywords in the question and known vars.
     Returns formula_id or empty string.
     """
     question_lower = question.lower()
+    known_vars = known_vars or {}
 
-    # Score each formula by keyword matches
+    # Score each formula by keyword matches and variable matches
     scores = {}
     for fid, formula in FORMULA_BANK.items():
         score = sum(1 for kw in formula["keywords"] if kw in question_lower)
+        
+        # Add score for matching variables
+        for var in known_vars:
+            if var in formula["variables"]:
+                score += 2  # Strong weight for actual variables found
+                
         if score > 0:
             scores[fid] = score
 

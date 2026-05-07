@@ -71,7 +71,7 @@ class VariableExtractor:
         variables = {}
 
         for pattern_tuple in self.PATTERNS:
-            if len(pattern_tuple) == 3:
+            if len(pattern_tuple) == 2:
                 pattern, canonical_unit = pattern_tuple[0], pattern_tuple[1]
             else:
                 continue

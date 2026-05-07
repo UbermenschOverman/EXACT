@@ -45,9 +45,22 @@ class PhysicsSolver:
         """
         trace = []
 
-        # 1. Detect formula
+        # 1. Extract variables
+        known_vars = self.extractor.extract(question)
+
+        trace.append({
+            "step": 1,
+            "action": "extract_variables",
+            "detail": f"Extracted variables: {known_vars}",
+            "known": known_vars,
+        })
+
+        if not known_vars:
+            return self._failure("Could not extract any variables from question", trace)
+
+        # 2. Detect formula
         if not formula_id:
-            formula_id = detect_formula(question)
+            formula_id = detect_formula(question, known_vars)
 
         if not formula_id:
             return self._failure("Could not identify applicable formula", trace)
@@ -57,25 +70,12 @@ class PhysicsSolver:
             return self._failure(f"Formula '{formula_id}' not found in bank", trace)
 
         trace.append({
-            "step": 1,
+            "step": 2,
             "action": "identify_formula",
             "detail": f"Identified: {formula['name']}",
             "formula_id": formula_id,
             "formula_name": formula["name"],
         })
-
-        # 2. Extract variables
-        known_vars = self.extractor.extract(question)
-
-        trace.append({
-            "step": 2,
-            "action": "extract_variables",
-            "detail": f"Extracted variables: {known_vars}",
-            "known": known_vars,
-        })
-
-        if not known_vars:
-            return self._failure("Could not extract any variables from question", trace)
 
         # 3. Determine target variable
         target = self.extractor.extract_target(question)

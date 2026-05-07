@@ -12,42 +12,27 @@ The system translates natural language questions into **First-Order Logic (FOL)*
 Input Question
       │
       ▼
-┌─────────────┐
-│ LLM Planner │  Break question into logical steps
-└──────┬──────┘
-       │
-       ▼
-┌──────────────┐
-│  Translator  │  Convert to First-Order Logic (FOL)
-└──────┬───────┘
-       │
-       ▼
-┌──────────────┐
-│  FOL Parser  │  Parse FOL string into structured representation
-└──────┬───────┘
-       │
-       ▼
-┌───────────────────┐
-│  Symbolic Solver  │  Solve using SymPy / Z3
-└────────┬──────────┘
-         │
-         ▼
-┌──────────────────┐
-│ Proof Generator  │  Generate step-by-step proof trace
-└────────┬─────────┘
-         │
-         ▼
-┌────────────┐
-│  Verifier  │  Validate answer against proof
-└─────┬──────┘
-      │
-      ▼
+┌───────────────┐
+│ LLM Classifier│  Identify: Physics | Logic | General
+└───────┬───────┘
+        │
+  ┌─────┼────────────┐
+  ▼     ▼            ▼
+Physics Logic      General
+Solver  Solver     Pipeline
+  │     │            │
+  ▼     ▼            ▼
+┌───────────────┐
+│   Verifier    │  Numerical Sanity & Unit Consistency Check
+└───────┬───────┘
+        │
+        ▼
 ┌───────────────┐
 │ LLM Explainer │  Generate natural language explanation
 └───────┬───────┘
         │
         ▼
-  Final Answer + Explanation
+  Unified ReasoningOutput
 ```
 
 ---
@@ -162,29 +147,26 @@ llm:
 
 ### Orchestrator (`src/orchestrator.py`)
 
-The central reasoning loop executes 6 steps with **automatic retry** (default: 2 retries):
+The central reasoning loop classifies questions and routes them to appropriate solvers:
 
-| Step | Component | Description |
-|------|-----------|-------------|
-| 1 | **Planner** | Decomposes question into ordered logical steps |
-| 2 | **Translator** | Converts natural language → FOL expression |
-| 3 | **Parser** | Parses FOL string into structured dict |
-| 4 | **Solver** | Symbolically solves using SymPy |
-| 5 | **Proof Generator** | Creates step-by-step proof trace |
-| 6 | **Verifier** | Checks if answer is consistent with proof |
+| Solver | Used For | Mechanism |
+|--------|----------|-----------|
+| **Physics Solver** | Numerical physics problems | Hybrid regex/LLM variable extraction + Formula Bank + SymPy computation |
+| **Logic Solver** | Deductive logic problems | LLM premise extraction + Premise Graph + Forward Chaining |
+| **General Solver** | Fallback & Definitions | LLM step planning + Best-effort FOL translation |
 
-If verification passes → LLM Explainer generates a human-readable explanation.  
-If all retries fail → returns `{"answer": "UNKNOWN", "valid": false}`.
+The output from any solver is passed to the **Verifier** for multi-layer validation (numerical sanity, unit consistency, reasoning consistency). If verified (or high confidence), the **LLM Explainer** generates a human-readable explanation.
 
 ### Evaluator (`src/evaluator.py`)
 
-Three evaluation metrics, each normalized to `[0, 1]`:
+Four evaluation metrics, each normalized to `[0, 1]`:
 
 | Metric | What it measures |
 |--------|------------------|
-| **P1 — Accuracy** | Exact match between predicted and reference answer |
-| **P2 — Explanation** | Heuristic quality: length > 50 chars + reasoning keywords |
-| **P3 — Reasoning** | Structured reasoning depth: has FOL (+0.4), proof (+0.4), verified (+0.2) |
+| **P1 — Accuracy** | Output match against reference (with numerical tolerance) |
+| **P2 — Explanation** | Heuristic quality: length, reasoning keywords, structure |
+| **P3 — Reasoning** | Presence of structured artifacts: formal representation, proof steps, premise tracking |
+| **P4 — Trace** | Completeness of the step-by-step reasoning trace based on the question type |
 
 ### LLM Layer (`src/llm/`)
 

@@ -78,11 +78,12 @@ class FOLParser:
         Handles numbered lists, bullet points, and line-separated premises.
         """
         premises = []
-
+        
         # Split on newlines, numbered items, or bullet points
         lines = re.split(r'\n|(?:^|\n)\s*\d+[.)]\s*|(?:^|\n)\s*[-•]\s*', raw)
-
-        for i, line in enumerate(lines):
+        
+        pid_counter = 1
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -91,11 +92,12 @@ class FOLParser:
             negation = parsed.get("type") == "negation"
 
             premises.append({
-                "id": f"P{i + 1}",
+                "id": f"P{pid_counter}",
                 "text": line,
                 "negation": negation,
                 "parsed": parsed,
             })
+            pid_counter += 1
 
         return premises
 
