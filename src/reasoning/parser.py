@@ -2,140 +2,130 @@
 
 """
 FOL parser — extracts premises, rules, and implications from text.
-Upgraded from basic string splitting to structured premise parsing.
+Upgraded to parse Unicode FOL strings into formal AST representations.
 """
 
 import re
-from typing import List, Dict, Optional
-
+from typing import List, Dict, Optional, Tuple
+from src.reasoning.fol import (
+    ASTNode, Variable, Constant, Predicate, 
+    Negation, Conjunction, Implication, ForAll, Exists
+)
 
 class FOLParser:
     """Parser for First-Order Logic expressions and natural language premises."""
 
-    # Patterns for detecting logical structures
-    IMPLICATION_PATTERNS = [
-        r"(.+?)\s*->\s*(.+)",           # A -> B
-        r"(.+?)\s*→\s*(.+)",            # A → B
-        r"if\s+(.+?)\s*,?\s*then\s+(.+)",  # if A, then B
-        r"(.+?)\s+implies\s+(.+)",       # A implies B
-    ]
+    def parse_ast(self, s: str) -> ASTNode:
+        """Parse a string into an AST Node."""
+        s = s.strip()
+        
+        # Handle broken unicode forall
+        s = s.replace("forall", "∀")
+        s = s.replace("->", "→")
+        
+        # Strip outer parens if they exist and are matched
+        if s.startswith('(') and s.endswith(')'):
+            # Check if outer parens match
+            depth = 0
+            matched = True
+            for i, c in enumerate(s):
+                if c == '(': depth += 1
+                elif c == ')': depth -= 1
+                if depth == 0 and i < len(s) - 1:
+                    matched = False
+                    break
+            if matched:
+                return self.parse_ast(s[1:-1])
 
-    NEGATION_PATTERNS = [
-        r"^not\s+(.+)",                  # not A
-        r"^¬\s*(.+)",                    # ¬A
-        r"^it is not the case that\s+(.+)",
-    ]
+        # ForAll: ∀x (Statement) or ∀x, Statement or ∀(x, Statement)
+        match = re.match(r'∀\s*\(?\s*([a-z])\s*[,(]?\s*(.+)', s)
+        if match:
+            var_name, rest = match.groups()
+            if rest.endswith(')'): rest = rest[:-1]
+            return ForAll(Variable(var_name), self.parse_ast(rest))
 
-    CONJUNCTION_PATTERNS = [
-        r"(.+?)\s+and\s+(.+)",           # A and B
-        r"(.+?)\s*∧\s*(.+)",            # A ∧ B
-    ]
+        # Exists: ∃x (Statement) or ∃(x, Statement)
+        match = re.match(r'∃\s*\(?\s*([a-z])\s*[,(]?\s*(.+)', s)
+        if match:
+            var_name, rest = match.groups()
+            if rest.endswith(')'): rest = rest[:-1]
+            return Exists(Variable(var_name), self.parse_ast(rest))
 
-    def parse(self, fol_str: str) -> dict:
-        """
-        Parse a FOL string into structured representation.
-        Enhanced version of original parser.
-        """
-        fol_str = fol_str.strip()
+        # Implication: split by top-level →
+        depth = 0
+        for i, c in enumerate(s):
+            if c == '(': depth += 1
+            elif c == ')': depth -= 1
+            elif c == '→' and depth == 0:
+                left = s[:i].strip()
+                right = s[i+1:].strip()
+                return Implication(self.parse_ast(left), self.parse_ast(right))
 
-        # Try implication
-        for pattern in self.IMPLICATION_PATTERNS:
-            match = re.match(pattern, fol_str, re.IGNORECASE)
-            if match:
-                return {
-                    "type": "implication",
-                    "premise": match.group(1).strip(),
-                    "conclusion": match.group(2).strip()
-                }
+        # Conjunction: split by top-level ∧
+        depth = 0
+        for i, c in enumerate(s):
+            if c == '(': depth += 1
+            elif c == ')': depth -= 1
+            elif c == '∧' and depth == 0:
+                left = s[:i].strip()
+                right = s[i+1:].strip()
+                return Conjunction(self.parse_ast(left), self.parse_ast(right))
 
-        # Try negation
-        for pattern in self.NEGATION_PATTERNS:
-            match = re.match(pattern, fol_str, re.IGNORECASE)
-            if match:
-                return {
-                    "type": "negation",
-                    "value": match.group(1).strip()
-                }
+        # Negation: ¬Statement
+        if s.startswith('¬'):
+            return Negation(self.parse_ast(s[1:].strip()))
+            
+        # Predicate: Name(arg1, arg2)
+        match = re.match(r'([A-Za-z0-9_]+)\((.+)\)', s)
+        if match:
+            name, args_str = match.groups()
+            args_list = [arg.strip() for arg in args_str.split(',')]
+            ast_args = []
+            for arg in args_list:
+                if arg.islower():
+                    ast_args.append(Variable(arg))
+                else:
+                    ast_args.append(Constant(arg))
+            return Predicate(name, ast_args)
 
-        # Try conjunction
-        for pattern in self.CONJUNCTION_PATTERNS:
-            match = re.match(pattern, fol_str, re.IGNORECASE)
-            if match:
-                return {
-                    "type": "conjunction",
-                    "left": match.group(1).strip(),
-                    "right": match.group(2).strip()
-                }
-
-        return {
-            "type": "atomic",
-            "value": fol_str
-        }
+        # Fallback to atomic predicate with no args
+        return Predicate(s, [])
 
     def parse_premises(self, raw: str) -> List[Dict]:
         """
         Extract individual premises from a block of text.
-        Handles numbered lists, bullet points, and line-separated premises.
         """
         premises = []
-        
-        # Split on newlines, numbered items, or bullet points
         lines = re.split(r'\n|(?:^|\n)\s*\d+[.)]\s*|(?:^|\n)\s*[-•]\s*', raw)
-        
         pid_counter = 1
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-
-            parsed = self.parse(line)
-            negation = parsed.get("type") == "negation"
+                
+            try:
+                ast = self.parse_ast(line)
+                negation = isinstance(ast, Negation)
+            except Exception:
+                ast = None
+                negation = False
 
             premises.append({
                 "id": f"P{pid_counter}",
                 "text": line,
                 "negation": negation,
-                "parsed": parsed,
+                "ast": ast,
             })
             pid_counter += 1
 
         return premises
 
-    def parse_rules(self, premises: List[Dict]) -> List[Dict]:
-        """
-        Extract entailment rules from parsed premises.
-        Implications become rules: premise -> conclusion.
-        """
-        rules = []
-
-        for p in premises:
-            parsed = p.get("parsed", {})
-
-            if parsed.get("type") == "implication":
-                # Find or create premise IDs for condition and conclusion
-                condition_id = p["id"]
-                conclusion_id = f"{p['id']}_conclusion"
-
-                rules.append({
-                    "id": f"R{len(rules) + 1}",
-                    "conditions": [condition_id],
-                    "conclusion": conclusion_id,
-                    "text": f"If {parsed['premise']}, then {parsed['conclusion']}",
-                    "condition_text": parsed["premise"],
-                    "conclusion_text": parsed["conclusion"],
-                })
-
-        return rules
-
     def extract_premises_and_rules(self, raw: str) -> Dict:
         """
-        Combined extraction: parse text into premises + rules.
-        Returns structured data ready for LogicSolver.
+        Extract premises (returns flat list).
         """
         premises = self.parse_premises(raw)
-        rules = self.parse_rules(premises)
-
         return {
             "premises": premises,
-            "rules": rules,
+            "rules": []  # rules are integrated into premise ASTs
         }

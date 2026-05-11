@@ -1,142 +1,110 @@
 # src/reasoning/variable_extractor.py
 
-"""
-Hybrid regex + heuristic variable extractor.
-Extracts variable names, values, and units from natural language physics questions.
-"""
-
 import re
-from typing import Dict, Optional, Tuple, List
-
+from typing import Dict, Tuple
 
 class VariableExtractor:
-    """Extracts physics variables and their values from question text."""
+    """
+    Competition-grade variable extractor supporting extensive scientific notation,
+    SI prefixes, unicode normalization, and canonical aliases.
+    """
 
-    # Regex patterns: variable = value unit
-    PATTERNS = [
-        # V=10V, I=2A, R=5Ω etc.
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(V|volt|volts)\b', "V"),
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(A|amp|amps|ampere|amperes)\b', "A"),
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(Ω|ohm|ohms)\b', "Ω"),
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(W|watt|watts)\b', "W"),
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(F|farad|farads)\b', "F"),
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(J|joule|joules)\b', "J"),
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(N|newton|newtons)\b', "N"),
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(C|coulomb|coulombs)\b', "C"),
-        (r'([A-Za-z_]+)\s*=\s*([\d.]+)\s*(N/C)\b', "N/C"),
+    # Value regex handles:
+    # 10^-8, 10⁻⁸, 3 × 10^-6, 3x10^-6, 3e-6, 100, 100.5
+    VALUE_REGEX = r'([\d.]*)\s*(?:[x×*eE]?\s*10\s*[\^]?\s*([⁻\-]?\d+)|[eE]([+-]?\d+)|[x×*]?\s*10\s*([⁻⁺⁰¹²³⁴⁵⁶⁷⁸⁹]+))?'
 
-        # Standalone values with units: "10V", "5 ohm", "2 amperes"
-        (r'([\d.]+)\s*(V|volt|volts)\b', "V"),
-        (r'([\d.]+)\s*(A|amp|amps|ampere|amperes)\b', "A"),
-        (r'([\d.]+)\s*(Ω|ohm|ohms)\b', "Ω"),
-        (r'([\d.]+)\s*(W|watt|watts)\b', "W"),
-        (r'([\d.]+)\s*(F|farad|farads)\b', "F"),
-        (r'([\d.]+)\s*(J|joule|joules)\b', "J"),
-        (r'([\d.]+)\s*(N|newton|newtons)\b', "N"),
-        (r'([\d.]+)\s*(C|coulomb|coulombs)\b', "C"),
+    PREFIXES = {
+        'T': 1e12, 'tera': 1e12,
+        'G': 1e9, 'giga': 1e9,
+        'M': 1e6, 'mega': 1e6,
+        'k': 1e3, 'kilo': 1e3,
+        'c': 1e-2, 'centi': 1e-2,
+        'm': 1e-3, 'milli': 1e-3,
+        'μ': 1e-6, 'u': 1e-6, 'micro': 1e-6,
+        'n': 1e-9, 'nano': 1e-9,
+        'p': 1e-12, 'pico': 1e-12
+    }
+    
+    SUPERSCRIPTS = {'⁻': '-', '⁺': '+', '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9'}
+
+    VARIABLE_ALIASES = {
+        'U': 'V',
+        'I': 'current',
+        'q': 'charge',
+        'Q': 'charge',
+        'F_res': 'F',
+        'E': 'energy',
+        'C': 'capacitance'
+    }
+
+    UNIT_PATTERNS = [
+        (r'V|volt|volts', 'V'),
+        (r'A|amp|amps|ampere|amperes', 'A'),
+        (r'Ω|ohm|ohms', 'Ω'),
+        (r'W|watt|watts', 'W'),
+        (r'F|farad|farads', 'F'),
+        (r'J|joule|joules', 'J'),
+        (r'C|coulomb|coulombs', 'C'),
+        (r'N|newton|newtons', 'N'),
+        (r'm|meter|meters', 'm'),
     ]
 
-    # Map unit strings to canonical variable names
-    UNIT_TO_VAR = {
-        "V": "V", "volt": "V", "volts": "V",
-        "A": "I", "amp": "I", "amps": "I", "ampere": "I", "amperes": "I",
-        "Ω": "R", "ohm": "R", "ohms": "R",
-        "W": "P", "watt": "P", "watts": "P",
-        "F": "C", "farad": "C", "farads": "C",
-        "J": "E", "joule": "E", "joules": "E",
-        "N": "F", "newton": "N", "newtons": "N",
-        "C": "q", "coulomb": "q", "coulombs": "q",
-        "N/C": "E_f",
-    }
-
-    # Target detection keywords
-    TARGET_KEYWORDS = {
-        "current": "I",
-        "voltage": "V",
-        "resistance": "R",
-        "power": "P",
-        "energy": "E",
-        "capacitance": "C",
-        "force": "F",
-        "charge": "q",
-        "electric field": "E_f",
-        "total resistance": "R_total",
-    }
+    def _parse_value(self, base: str, exp_standard: str, exp_e: str, exp_unicode: str) -> float:
+        # If there's no base but there is an exponent (e.g., 10^-6), base is 1.0
+        val = float(base) if base else 1.0
+        exponent = 0
+        
+        if exp_standard:
+            exponent = int(exp_standard)
+        elif exp_e:
+            exponent = int(exp_e)
+        elif exp_unicode:
+            norm_exp = "".join(self.SUPERSCRIPTS.get(c, c) for c in exp_unicode)
+            exponent = int(norm_exp)
+            
+        return val * (10 ** exponent)
 
     def extract(self, text: str) -> Dict[str, float]:
-        """
-        Extract variables and their numeric values from text.
-        Returns dict like {"V": 10.0, "R": 5.0}.
-        """
         variables = {}
-
-        for pattern_tuple in self.PATTERNS:
-            if len(pattern_tuple) == 2:
-                pattern, canonical_unit = pattern_tuple[0], pattern_tuple[1]
-            else:
-                continue
-
-            for match in re.finditer(pattern_tuple[0], text, re.IGNORECASE):
-                groups = match.groups()
-
-                if len(groups) == 3:
-                    # variable = value unit
-                    var_name = groups[0].strip()
-                    value = float(groups[1])
-                    unit = groups[2].strip()
-                elif len(groups) == 2:
-                    # value unit (standalone)
-                    value = float(groups[0])
-                    unit = groups[1].strip()
-                    # Infer variable name from unit
-                    var_name = self.UNIT_TO_VAR.get(unit, unit[0].upper())
-                else:
+        
+        for unit_pat, canon_unit in self.UNIT_PATTERNS:
+            prefix_pat = r'([TGMkmμunp]?)'
+            
+            # The regex accounts for optional base value when standalone exponent is given like 10^-8
+            full_regex = rf'([A-Za-z0-9_]+)\s*=\s*{self.VALUE_REGEX}\s*{prefix_pat}({unit_pat})\b'
+            
+            for match in re.finditer(full_regex, text):
+                raw_var_name = match.group(1)
+                base_val = match.group(2)
+                exp_std = match.group(3)
+                exp_e = match.group(4)
+                exp_uni = match.group(5)
+                prefix = match.group(6)
+                
+                # If everything is empty, this wasn't a valid match
+                if not any([base_val, exp_std, exp_e, exp_uni]):
                     continue
-
-                # Map explicit variable names
-                canonical = self._canonicalize_var(var_name, unit)
-                variables[canonical] = value
+                
+                val = self._parse_value(base_val, exp_std, exp_e, exp_uni)
+                
+                if prefix and prefix in self.PREFIXES:
+                    val *= self.PREFIXES[prefix]
+                    
+                # Apply canonical alias
+                var_name = self.VARIABLE_ALIASES.get(raw_var_name, raw_var_name)
+                    
+                variables[var_name] = val
 
         return variables
 
-    def extract_target(self, text: str) -> Optional[str]:
-        """
-        Determine what variable to solve for based on question text.
-        Looks for "calculate X", "find X", "what is X" patterns.
-        """
+    def extract_target(self, text: str) -> str:
         text_lower = text.lower()
-
-        # Direct target patterns
-        target_patterns = [
-            r'(?:calculate|find|determine|compute|what is(?: the)?)\s+(?:the\s+)?(\w[\w\s]*?)(?:\s+if|\s+when|\s+given|\?|$)',
-            r'(?:how much|how many)\s+(\w[\w\s]*?)(?:\s+if|\s+when|\s+given|\?|$)',
-        ]
-
-        for pattern in target_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                target_text = match.group(1).strip()
-                # Map to variable name
-                for keyword, var in self.TARGET_KEYWORDS.items():
-                    if keyword in target_text:
-                        return var
-
-        # Fallback: find the variable NOT mentioned with a value
-        mentioned_vars = set(self.extract(text).keys())
-        for keyword, var in self.TARGET_KEYWORDS.items():
-            if keyword in text_lower and var not in mentioned_vars:
-                return var
-
-        return None
-
-    def _canonicalize_var(self, var_name: str, unit: str) -> str:
-        """Map variable name to canonical form."""
-        # First try explicit variable name
-        var_upper = var_name.upper()
-        if var_upper in ("V", "I", "R", "P", "E", "F", "C"):
-            return var_upper
-        if var_name.lower() in ("q", "e_f", "r_total", "r1", "r2", "r3"):
-            return var_name
-
-        # Fall back to unit-based mapping
-        return self.UNIT_TO_VAR.get(unit, self.UNIT_TO_VAR.get(unit.lower(), var_name))
+        if "energy" in text_lower or "work" in text_lower: return self.VARIABLE_ALIASES.get("E", "E")
+        if "force" in text_lower: return self.VARIABLE_ALIASES.get("F", "F")
+        if "capacitance" in text_lower or "capacitor" in text_lower: return self.VARIABLE_ALIASES.get("C", "C")
+        if "voltage" in text_lower or "potential" in text_lower: return self.VARIABLE_ALIASES.get("U", "U")
+        if "current" in text_lower: return self.VARIABLE_ALIASES.get("I", "I")
+        if "resistance" in text_lower: return self.VARIABLE_ALIASES.get("R", "R")
+        if "charge" in text_lower: return self.VARIABLE_ALIASES.get("Q", "Q")
+        
+        return "Unknown"

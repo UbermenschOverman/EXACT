@@ -1,183 +1,112 @@
 # src/reasoning/premise_graph.py
 
-"""
-Directed graph of premises with entailment edges.
-Supports rule chaining, contradiction detection, and premise tracking.
-"""
-
 from typing import Dict, List, Optional, Set, Tuple
 from collections import deque
-
+from src.reasoning.fol import ASTNode, ForAll, Implication, Predicate, Negation, Variable, Constant
 
 class PremiseNode:
-    """A single premise in the graph."""
-
-    def __init__(self, premise_id: str, text: str, is_given: bool = True):
+    def __init__(self, premise_id: str, ast: ASTNode, is_given: bool = True):
         self.premise_id = premise_id
-        self.text = text
-        self.is_given = is_given       # True = from input, False = derived
-        self.negation = False          # True if this is a negated premise
-        self.derived_from: List[str] = []  # which premises led to this one
-
-
-class Rule:
-    """An entailment rule: if all conditions hold, then conclusion follows."""
-
-    def __init__(self, rule_id: str, conditions: List[str], conclusion: str,
-                 rule_text: str = ""):
-        self.rule_id = rule_id
-        self.conditions = conditions   # list of premise IDs
-        self.conclusion = conclusion   # premise ID of conclusion
-        self.rule_text = rule_text     # human-readable rule
-
+        self.ast = ast
+        self.text = str(ast)
+        self.is_given = is_given
+        self.derived_from: List[str] = []
 
 class PremiseGraph:
-    """Directed graph for managing premises and entailment relationships."""
-
     def __init__(self):
         self.premises: Dict[str, PremiseNode] = {}
-        self.rules: List[Rule] = []
-        self.edges: Dict[str, List[str]] = {}  # premise_id -> [reachable premise_ids]
         self._used_premises: Set[str] = set()
+        self.pid_counter = 100
 
-    def add_premise(self, premise_id: str, text: str, is_given: bool = True,
-                    negation: bool = False) -> PremiseNode:
-        """Add a premise to the graph."""
-        node = PremiseNode(premise_id, text, is_given)
-        node.negation = negation
+    def add_premise(self, premise_id: str, ast: ASTNode, is_given: bool = True) -> PremiseNode:
+        node = PremiseNode(premise_id, ast, is_given)
         self.premises[premise_id] = node
-        if premise_id not in self.edges:
-            self.edges[premise_id] = []
         return node
 
-    def add_rule(self, rule_id: str, conditions: List[str],
-                 conclusion: str, rule_text: str = "") -> Rule:
-        """Add an entailment rule: conditions => conclusion."""
-        rule = Rule(rule_id, conditions, conclusion, rule_text)
-        self.rules.append(rule)
+    def unify(self, pred1: Predicate, pred2: Predicate) -> Optional[Dict[str, Constant]]:
+        """Attempt to unify two predicates. Return substitution dict or None."""
+        if pred1.name != pred2.name or len(pred1.args) != len(pred2.args):
+            return None
+        subst = {}
+        for a1, a2 in zip(pred1.args, pred2.args):
+            if isinstance(a1, Variable) and isinstance(a2, Constant):
+                subst[a1.name] = a2
+            elif isinstance(a2, Variable) and isinstance(a1, Constant):
+                subst[a2.name] = a1
+            elif isinstance(a1, Constant) and isinstance(a2, Constant) and a1.name != a2.name:
+                return None
+        return subst
 
-        # Add edges from each condition to conclusion
-        for cond in conditions:
-            if cond in self.edges:
-                self.edges[cond].append(conclusion)
-            else:
-                self.edges[cond] = [conclusion]
-
-        return rule
+    def apply_subst(self, ast: ASTNode, subst: Dict[str, Constant]) -> ASTNode:
+        """Apply substitution to AST."""
+        if isinstance(ast, Predicate):
+            new_args = [subst.get(a.name, a) if isinstance(a, Variable) else a for a in ast.args]
+            return Predicate(ast.name, new_args)
+        elif isinstance(ast, Negation):
+            return Negation(self.apply_subst(ast.statement, subst))
+        return ast
 
     def forward_chain(self) -> List[str]:
-        """
-        Apply all rules via forward chaining.
-        Returns list of newly derived premise IDs.
-        """
-        derived = []
+        derived_ids = []
         changed = True
 
         while changed:
             changed = False
-            for rule in self.rules:
-                # Check if all conditions are satisfied
-                all_satisfied = all(
-                    cid in self.premises for cid in rule.conditions
-                )
+            current_nodes = list(self.premises.values())
+            
+            # Find rules: ForAll(x, Implication(A, B))
+            rules = [n for n in current_nodes if isinstance(n.ast, ForAll) and isinstance(n.ast.statement, Implication)]
+            
+            # Find facts: Predicate or Negation(Predicate) where args are Constants
+            facts = [n for n in current_nodes if isinstance(n.ast, (Predicate, Negation))]
 
-                if all_satisfied and rule.conclusion not in self.premises:
-                    # Derive new premise
-                    conclusion_text = rule.rule_text or f"Derived from {rule.conditions}"
-                    node = self.add_premise(
-                        rule.conclusion,
-                        conclusion_text,
-                        is_given=False
-                    )
-                    node.derived_from = list(rule.conditions)
-                    derived.append(rule.conclusion)
-                    changed = True
+            for rule_node in rules:
+                rule = rule_node.ast.statement
+                condition = rule.premise
+                conclusion = rule.conclusion
 
-                    # Track used premises
-                    for cid in rule.conditions:
-                        self._used_premises.add(cid)
+                for fact_node in facts:
+                    # Try to unify fact with rule condition
+                    fact_ast = fact_node.ast
+                    cond_ast = condition
+                    
+                    # Handle negations matching
+                    if isinstance(fact_ast, Negation) and isinstance(cond_ast, Negation):
+                        subst = self.unify(fact_ast.statement, cond_ast.statement)
+                    elif not isinstance(fact_ast, Negation) and not isinstance(cond_ast, Negation):
+                        subst = self.unify(fact_ast, cond_ast)
+                    else:
+                        subst = None
 
-        return derived
+                    if subst is not None:
+                        new_ast = self.apply_subst(conclusion, subst)
+                        new_text = str(new_ast)
+                        
+                        # Check if we already have this
+                        exists = any(n.text == new_text for n in self.premises.values())
+                        if not exists:
+                            new_id = f"D{self.pid_counter}"
+                            self.pid_counter += 1
+                            new_node = self.add_premise(new_id, new_ast, is_given=False)
+                            new_node.derived_from = [rule_node.premise_id, fact_node.premise_id]
+                            derived_ids.append(new_id)
+                            self._used_premises.add(rule_node.premise_id)
+                            self._used_premises.add(fact_node.premise_id)
+                            changed = True
 
-    def get_entailment_chain(self, target: str) -> List[str]:
-        """
-        BFS backward from target to find the chain of premises
-        that lead to the target conclusion.
-        """
-        if target not in self.premises:
-            return []
-
-        chain = []
-        visited = set()
-        queue = deque([target])
-
-        while queue:
-            current = queue.popleft()
-            if current in visited:
-                continue
-            visited.add(current)
-
-            node = self.premises.get(current)
-            if node:
-                chain.append(current)
-                self._used_premises.add(current)
-
-                # Trace back through derivations
-                for parent_id in node.derived_from:
-                    if parent_id not in visited:
-                        queue.append(parent_id)
-
-        chain.reverse()
-        return chain
+        return derived_ids
 
     def detect_contradiction(self) -> Optional[str]:
-        """
-        Check if any premise and its negation both exist.
-        Returns description of contradiction, or None.
-        """
-        premise_texts = {}
-
+        texts = {}
         for pid, node in self.premises.items():
-            base_text = node.text.strip().lower()
-
-            # Simple negation detection
-            if base_text.startswith("not "):
-                positive = base_text[4:]
-                if positive in premise_texts:
-                    return (
-                        f"Contradiction: '{premise_texts[positive]}' and "
-                        f"'{node.text}' (premises {premise_texts[positive]}, {pid})"
-                    )
-            else:
-                negated = f"not {base_text}"
-                for other_pid, other_node in self.premises.items():
-                    if other_node.text.strip().lower() == negated:
-                        return (
-                            f"Contradiction: '{node.text}' and "
-                            f"'{other_node.text}' (premises {pid}, {other_pid})"
-                        )
-
-            premise_texts[base_text] = pid
-
+            ast = node.ast
+            if isinstance(ast, Predicate):
+                texts[str(ast)] = pid
+            elif isinstance(ast, Negation):
+                base_str = str(ast.statement)
+                if base_str in texts:
+                    return f"Contradiction: {base_str} and ¬{base_str}"
         return None
 
     def get_used_premises(self) -> List[str]:
-        """Return list of premise texts that were used in reasoning."""
-        used = []
-        for pid in self._used_premises:
-            if pid in self.premises:
-                used.append(self.premises[pid].text)
-        return used
-
-    def get_all_premises(self) -> List[dict]:
-        """Return all premises as dicts."""
-        return [
-            {
-                "id": pid,
-                "text": node.text,
-                "is_given": node.is_given,
-                "negation": node.negation,
-                "derived_from": node.derived_from,
-            }
-            for pid, node in self.premises.items()
-        ]
+        return [self.premises[pid].text for pid in self._used_premises if pid in self.premises]

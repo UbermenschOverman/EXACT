@@ -1,153 +1,137 @@
 # src/reasoning/formula_bank.py
 
-"""
-Registry of physics formulas for deterministic computation.
-Each formula defines its equation, variables, units, and detection keywords.
-"""
+from typing import Dict, List, Any, Tuple
 
 FORMULA_BANK = {
     "ohm_law": {
         "name": "Ohm's Law",
-        "equation": "V - I * R",          # SymPy: set to 0
-        "solve_forms": {
-            "V": "I * R",
-            "I": "V / R",
-            "R": "V / I",
-        },
-        "variables": {
-            "V": {"desc": "voltage", "unit": "V"},
-            "I": {"desc": "current", "unit": "A"},
-            "R": {"desc": "resistance", "unit": "Ω"},
-        },
-        "keywords": ["ohm", "voltage", "current", "resistance", "v=ir", "i=v/r"],
+        "variables": ["V", "current", "R"],
+        "aliases": ["ohm", "v=ir"],
+        "target_variables": ["V", "current", "R"],
+        "units": {"V": "V", "current": "A", "R": "Ω"},
+        "keywords": ["ohm", "voltage", "current", "resistance"],
+        "equation": "V - current * R",
+        "inverse_solve_forms": {
+            "V": "current * R",
+            "current": "V / R",
+            "R": "V / current"
+        }
     },
     "power_vi": {
-        "name": "Electric Power (V×I)",
-        "equation": "P - V * I",
-        "solve_forms": {
-            "P": "V * I",
-            "V": "P / I",
-            "I": "P / V",
-        },
-        "variables": {
-            "P": {"desc": "power", "unit": "W"},
-            "V": {"desc": "voltage", "unit": "V"},
-            "I": {"desc": "current", "unit": "A"},
-        },
-        "keywords": ["power", "watt", "p=vi"],
-    },
-    "power_ir": {
-        "name": "Electric Power (I²R)",
-        "equation": "P - I**2 * R",
-        "solve_forms": {
-            "P": "I**2 * R",
-            "I": "sqrt(P / R)",
-            "R": "P / I**2",
-        },
-        "variables": {
-            "P": {"desc": "power", "unit": "W"},
-            "I": {"desc": "current", "unit": "A"},
-            "R": {"desc": "resistance", "unit": "Ω"},
-        },
-        "keywords": ["power", "i squared r", "i²r", "p=i²r", "p=i^2r"],
+        "name": "Electric Power (V, I)",
+        "variables": ["P", "V", "current"],
+        "aliases": ["p=vi"],
+        "target_variables": ["P", "V", "current"],
+        "units": {"P": "W", "V": "V", "current": "A"},
+        "keywords": ["power", "watt", "voltage", "current"],
+        "equation": "P - V * current",
+        "inverse_solve_forms": {
+            "P": "V * current",
+            "V": "P / current",
+            "current": "P / V"
+        }
     },
     "capacitor_energy": {
-        "name": "Capacitor Energy",
-        "equation": "E - Rational(1,2) * C * V**2",
-        "solve_forms": {
-            "E": "Rational(1,2) * C * V**2",
-            "C": "2 * E / V**2",
-            "V": "sqrt(2 * E / C)",
-        },
-        "variables": {
-            "E": {"desc": "energy", "unit": "J"},
-            "C": {"desc": "capacitance", "unit": "F"},
-            "V": {"desc": "voltage", "unit": "V"},
-        },
-        "keywords": ["capacitor", "capacitance", "stored energy", "e=1/2cv"],
+        "name": "Energy Stored in Capacitor",
+        "variables": ["energy", "capacitance", "V"],
+        "aliases": ["e=0.5cu^2"],
+        "target_variables": ["energy", "capacitance", "V"],
+        "units": {"energy": "J", "capacitance": "F", "V": "V"},
+        "keywords": ["capacitor", "energy", "stored", "capacitance"],
+        "equation": "energy - 0.5 * capacitance * (V**2)",
+        "inverse_solve_forms": {}
     },
-    "electric_field": {
-        "name": "Electric Field",
-        "equation": "E_f - F / q",
-        "solve_forms": {
-            "E_f": "F / q",
-            "F": "E_f * q",
-            "q": "F / E_f",
-        },
-        "variables": {
-            "E_f": {"desc": "electric field", "unit": "N/C"},
-            "F": {"desc": "force", "unit": "N"},
-            "q": {"desc": "charge", "unit": "C"},
-        },
-        "keywords": ["electric field", "force", "charge", "e=f/q", "coulomb"],
+    "coulomb_law": {
+        "name": "Coulomb's Law",
+        "variables": ["F", "k", "q1", "q2", "r"],
+        "aliases": ["electrostatic force"],
+        "target_variables": ["F", "q1", "q2", "r"],
+        "units": {"F": "N", "q1": "C", "q2": "C", "r": "m"},
+        "keywords": ["coulomb", "charge", "force", "placed", "apart"],
+        "equation": "F - (k * abs(q1 * q2)) / (r**2)",
+        "constants": {"k": 8.9875517923e9},
+        "inverse_solve_forms": {}
     },
-    "resistance_series": {
-        "name": "Series Resistance",
-        "equation": "R_total - (R1 + R2)",
-        "solve_forms": {
-            "R_total": "R1 + R2",
-            "R1": "R_total - R2",
-            "R2": "R_total - R1",
-        },
-        "variables": {
-            "R_total": {"desc": "total resistance", "unit": "Ω"},
-            "R1": {"desc": "resistance 1", "unit": "Ω"},
-            "R2": {"desc": "resistance 2", "unit": "Ω"},
-        },
-        "keywords": ["series", "total resistance", "r1+r2", "r1 + r2"],
+    "resultant_force_cosines": {
+        "name": "Law of Cosines Resultant Force",
+        "variables": ["F", "F1", "F2", "theta"],
+        "aliases": ["vector addition", "resultant"],
+        "target_variables": ["F", "F1", "F2", "theta"],
+        "units": {"F": "N", "F1": "N", "F2": "N", "theta": "rad"},
+        "keywords": ["resultant", "force", "vector", "addition", "acting on", "angle"],
+        "equation": "F - sqrt(F1**2 + F2**2 + 2*F1*F2*cos(theta))",
+        "inverse_solve_forms": {}
     },
-    "resistance_parallel": {
-        "name": "Parallel Resistance",
-        "equation": "1/R_total - (1/R1 + 1/R2)",
-        "solve_forms": {
-            "R_total": "(R1 * R2) / (R1 + R2)",
-        },
-        "variables": {
-            "R_total": {"desc": "total resistance", "unit": "Ω"},
-            "R1": {"desc": "resistance 1", "unit": "Ω"},
-            "R2": {"desc": "resistance 2", "unit": "Ω"},
-        },
-        "keywords": ["parallel", "1/r", "parallel resistance"],
+    "right_triangle_electrostatics": {
+        "name": "Right Triangle Electrostatics",
+        "variables": ["F", "F1", "F2"],
+        "aliases": ["pythagoras"],
+        "target_variables": ["F"],
+        "units": {"F": "N", "F1": "N", "F2": "N"},
+        "keywords": ["right triangle", "orthogonal", "perpendicular"],
+        "equation": "F - sqrt(F1**2 + F2**2)",
+        "inverse_solve_forms": {
+            "F": "sqrt(F1**2 + F2**2)"
+        }
     },
+    "equilateral_triangle_electrostatics": {
+        "name": "Equilateral Triangle Resultant Force",
+        "variables": ["F", "F1", "F2"],
+        "aliases": ["equilateral 60 deg"],
+        "target_variables": ["F"],
+        "units": {"F": "N", "F1": "N", "F2": "N"},
+        "keywords": ["equilateral", "triangle", "resultant"],
+        "equation": "F - sqrt(F1**2 + F2**2 + F1*F2)", # since cos(60) = 0.5, 2*F1*F2*0.5 = F1*F2
+        "inverse_solve_forms": {
+            "F": "sqrt(F1**2 + F2**2 + F1*F2)"
+        }
+    }
 }
 
-
 def get_formula(formula_id: str) -> dict:
-    """Get a formula by ID."""
-    return FORMULA_BANK.get(formula_id)
+    return FORMULA_BANK.get(formula_id, {})
 
-
-def detect_formula(question: str, known_vars: dict = None) -> str:
+def score_formula(formula: dict, question: str, known_vars: dict) -> float:
     """
-    Detect which formula to use based on keywords in the question and known vars.
-    Returns formula_id or empty string.
+    Competition-grade formula scoring with overlap algorithms and confidence.
     """
     question_lower = question.lower()
-    known_vars = known_vars or {}
-
-    # Score each formula by keyword matches and variable matches
-    scores = {}
-    for fid, formula in FORMULA_BANK.items():
-        score = sum(1 for kw in formula["keywords"] if kw in question_lower)
+    score = 0.0
+    
+    # Keyword overlap scoring
+    for kw in formula.get("keywords", []):
+        if kw in question_lower:
+            score += 1.5
+            
+    # Alias exact match scoring
+    for alias in formula.get("aliases", []):
+        if alias in question_lower:
+            score += 3.0
+            
+    # Variable matching (strong signal)
+    matched_vars = sum(1 for v in known_vars if v in formula.get("variables", []))
+    score += matched_vars * 2.0
+    
+    # Penalize if too many variables are missing
+    total_vars = len(formula.get("variables", []))
+    constants = len(formula.get("constants", {}))
+    missing = total_vars - matched_vars - constants
+    if missing > 1: # Usually we can only solve for 1 unknown
+        score -= missing * 2.0
         
-        # Add score for matching variables
-        for var in known_vars:
-            if var in formula["variables"]:
-                score += 2  # Strong weight for actual variables found
-                
+    return max(0.0, score)
+
+def rank_formulas(question: str, known_vars: dict = None) -> List[Tuple[str, float]]:
+    """
+    Returns a sorted list of (formula_id, score) for multi-formula ranking.
+    """
+    known_vars = known_vars or {}
+    
+    ranked = []
+    for fid, formula in FORMULA_BANK.items():
+        score = score_formula(formula, question, known_vars)
         if score > 0:
-            scores[fid] = score
-
-    if not scores:
-        return ""
-
-    # Return the best match
-    return max(scores, key=scores.get)
-
-
-def list_formulas() -> list:
-    """List all available formulas."""
-    return [
-        {"id": fid, "name": f["name"], "equation": f["equation"]}
-        for fid, f in FORMULA_BANK.items()
-    ]
+            ranked.append((fid, score))
+            
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    return ranked

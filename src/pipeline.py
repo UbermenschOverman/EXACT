@@ -43,16 +43,9 @@ class Pipeline:
 
         generator = LLMGenerator(llm)
 
-        self.planner = Planner(generator)
-        self.translator = Translator(generator)
-        self.explainer = Explainer(generator)
-
-        self.orchestrator = Orchestrator(
-            self.planner,
-            self.translator,
-            self.explainer,
-            generator=generator,  # pass generator for classifier + premise extraction
-        )
+        # We completely bypass the LLM hallucinatory components for the competition grade pipeline
+        from src.reasoning.solver import EndToEndOrchestrator
+        self.orchestrator = EndToEndOrchestrator()
 
     def run(self, sample=None):
         """
