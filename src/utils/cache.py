@@ -44,6 +44,14 @@ class Cache:
 
     def set(self, key: Any, value: Any, namespace: str = "default") -> None:
         """Cache a value. Does NOT cache if value indicates failure."""
+        import dataclasses
+
+        # Normalize value to a plain dict so json.dump always works
+        if hasattr(value, "to_dict"):
+            value = value.to_dict()
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            value = dataclasses.asdict(value)
+
         # Don't cache failures
         if isinstance(value, dict):
             if value.get("answer") == "UNKNOWN" or value.get("error"):

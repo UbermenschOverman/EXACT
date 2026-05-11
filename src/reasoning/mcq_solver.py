@@ -1,83 +1,93 @@
 # src/reasoning/mcq_solver.py
+"""
+MCQ Solver — evaluates multiple-choice logic options deterministically.
 
-from typing import List, Dict, Any, Tuple
-from src.reasoning.logic_ir import LogicProblem, MCQOption
+Uses ontology canonicalization to convert NL options to FOL strings,
+then uses PremiseGraph to score derivability and contradiction.
+"""
+
+import logging
+from typing import Dict, List, Optional, Tuple
+
+from src.reasoning.world_model import WorldModel, MCQOption
 from src.reasoning.premise_graph import PremiseGraph
 from src.reasoning.parser import FOLParser
+from src.reasoning.fol import Negation
+from src.reasoning.ontology import PREDICATE_ALIASES
+
+logger = logging.getLogger(__name__)
+
 
 class MCQSolver:
-    """
-    Evaluates MCQ options deterministically.
-    Scores based on derivability, contradiction checks, and proof depth.
-    """
+
     def __init__(self):
         self.fol_parser = FOLParser()
 
-    def evaluate(self, problem: LogicProblem) -> Tuple[MCQOption, Dict[str, float]]:
-        if not problem.task or not problem.task.options:
+    def evaluate(self, wm: WorldModel) -> Tuple[Optional[MCQOption], Dict[str, float]]:
+        """
+        Evaluate MCQ options in the WorldModel.
+        Returns (best_option, {option_id: score}).
+        """
+        # Find MCQ goal
+        mcq_goal = next((g for g in wm.goals if g.goal_type == "mcq"), None)
+        if not mcq_goal or not mcq_goal.options:
             return None, {}
-            
-        best_option = None
-        best_score = -float('inf')
-        scores = {}
-        
-        # Build base premise graph once
-        base_graph = PremiseGraph()
-        for premise in problem.premises:
-            if premise.ast:
-                base_graph.add_premise(premise.id, premise.ast, is_given=True)
-                
-        # Forward chain to build full derivable space
-        base_graph.forward_chain()
-        base_contradiction = base_graph.detect_contradiction()
-        
-        for option in problem.task.options:
-            score = 0.0
-            
-            # Since options in the dataset are NL and we don't have an LLM here,
-            # we fallback to a naive heuristic for this demo.
-            # In a full neuro-symbolic pipeline, `option.ast` would be populated by the LLM.
-            if not option.ast:
-                # Attempt to parse directly (works if the dataset provided FOL for options, but it doesn't)
-                ast = self.fol_parser.parse_ast(option.text)
-            else:
-                ast = option.ast
-                
-            if not ast:
-                scores[option.option_id] = -1.0
-                continue
-                
-            ast_str = str(ast)
-            
-            # Check derivability (is it in the graph?)
-            found_yes = any(node.text == ast_str for node in base_graph.premises.values())
-            
-            from src.reasoning.fol import Negation
-            if isinstance(ast, Negation):
-                neg_str = str(ast.statement)
-            else:
-                neg_str = str(Negation(ast))
-                
-            found_no = any(node.text == neg_str for node in base_graph.premises.values())
-            
-            if found_yes:
-                score += 10.0
-                # Penalize by depth (simulate proof depth by looking at derived_from tree if we traced it)
-                # In PremiseGraph, derived nodes have IDs > 100
-                target_node = next((n for n in base_graph.premises.values() if n.text == ast_str), None)
-                if target_node and not target_node.is_given:
-                    score -= 1.0 # Slight penalty for multi-hop vs direct given
-            elif found_no:
-                score -= 10.0 # Contradiction
-                
-            if base_contradiction:
-                # Base system is inconsistent, ex falso quodlibet
-                score = 0.0
-                
+
+        # Build premise graph once
+        graph = PremiseGraph()
+        for i, p_str in enumerate(wm.premises_fol):
+            ast = self.fol_parser.parse_ast(p_str)
+            graph.add_premise(f"P{i+1}", ast, is_given=True)
+        graph.forward_chain()
+
+        # Collect all derivable text representations
+        derivable_texts = {n.text for n in graph.premises.values()}
+
+        scores: Dict[str, float] = {}
+        best_option: Optional[MCQOption] = None
+        best_score = -float("inf")
+
+        for option in mcq_goal.options:
+            score = self._score_option(option, derivable_texts)
             scores[option.option_id] = score
-            
+            option.score = score
             if score > best_score:
                 best_score = score
                 best_option = option
-                
+
         return best_option, scores
+
+    def _score_option(self, option: MCQOption,
+                       derivable_texts: set) -> float:
+        score = 0.0
+
+        # 1. If FOL string was canonicalized, check derivability directly
+        if option.fol_str:
+            try:
+                ast = self.fol_parser.parse_ast(option.fol_str)
+                ast_text = str(ast)
+                if ast_text in derivable_texts:
+                    score += 10.0
+                # Check negation
+                neg_text = str(Negation(ast))
+                if neg_text in derivable_texts:
+                    score -= 10.0
+            except Exception:
+                pass
+
+        # 2. Keyword matching against derivable predicate names
+        # Extract predicate names from derivable set
+        derivable_preds = set()
+        for dt in derivable_texts:
+            # e.g. "WT(x)" → "WT"
+            if "(" in dt:
+                derivable_preds.add(dt.split("(")[0].lstrip("¬∀∃ "))
+
+        # Check if option text mentions known derivable predicates
+        opt_lower = option.text.lower()
+        for phrase, pred in PREDICATE_ALIASES.items():
+            if phrase in opt_lower and pred in derivable_preds:
+                score += 5.0
+                break
+
+        return score
