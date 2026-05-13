@@ -49,13 +49,34 @@ st.markdown("""
 
 
 @st.cache_resource
-def get_orchestrator():
-    return EndToEndOrchestrator()
+def get_config():
+    from src.utils.config_loader import load_config
+    return load_config("config/base.yaml")
 
 
 @st.cache_resource
-def get_compiler():
-    return SemanticCompiler()
+def get_llm(config):
+    if config.get("use_llm_compiler"):
+        from src.llm.models import load_llm
+        try:
+            return load_llm(config["llm"])
+        except Exception as e:
+            st.error(f"Failed to load LLM: {e}")
+            return None
+    return None
+
+
+@st.cache_resource
+def get_orchestrator(_config, _llm):
+    return EndToEndOrchestrator(llm=_llm, use_llm_compiler=_config.get("use_llm_compiler", False))
+
+
+@st.cache_resource
+def get_compiler(_llm):
+    # Pass the same LLM instance to the compiler
+    from src.reasoning.llm_compiler import LLMCompiler
+    llm_compiler = LLMCompiler(_llm) if _llm else None
+    return SemanticCompiler(llm_compiler=llm_compiler)
 
 
 @st.cache_resource
@@ -67,9 +88,18 @@ def get_canonicalizer():
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
+config = get_config()
+use_llm = config.get("use_llm_compiler", False)
+
 st.sidebar.title("⚡ EXACT Engine")
 mode = st.sidebar.radio("Mode", ["Physics", "Logic"], index=0)
 debug = st.sidebar.checkbox("Show debug trace", value=True)
+
+# Status indicators
+llm_status = "ON" if use_llm else "OFF"
+st.sidebar.markdown(f"**Status:** LLM Compiler is **{llm_status}**")
+if use_llm:
+    st.sidebar.info(f"Model: {os.path.basename(config['llm']['model_path'])}")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Examples")
@@ -116,10 +146,15 @@ selected_example = st.sidebar.selectbox("Load example", ["(none)"] + list(exampl
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.title("⚡ EXACT — Neuro-Symbolic Reasoning Engine")
-st.markdown("Deterministic reasoning with symbolic solvers. LLM is OFF by default.")
 
-orchestrator = get_orchestrator()
-compiler = get_compiler()
+if use_llm:
+    st.markdown("Neuro-Symbolic reasoning active. LLM used for **constrained semantic translation** only.")
+else:
+    st.markdown("Deterministic symbolic reasoning active. LLM is **OFF**.")
+
+llm = get_llm(config)
+orchestrator = get_orchestrator(config, llm)
+compiler = get_compiler(llm)
 canon = get_canonicalizer()
 
 
@@ -226,5 +261,5 @@ elif mode == "Logic":
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**EXACT v2.2** | Neuro-Symbolic Engine")
-st.sidebar.markdown("LLM Compiler: **OFF**")
-st.sidebar.caption("All reasoning is deterministic.")
+st.sidebar.markdown(f"LLM Compiler: **{llm_status}**")
+st.sidebar.caption("Symbolic reasoning remains authoritative.")

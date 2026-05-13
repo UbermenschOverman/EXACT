@@ -4,7 +4,7 @@ task_type: qa
 output_path: outputs/predictions.json
 cache_dir: cache/
 
-use_llm_compiler: false    # Set true to enable constrained LLM translation
+use_llm_compiler: true    # Set true to enable constrained LLM translation
 
 llm:
   model_path: /mnt/data2/Ducnguyen/EXACT/models/mistral/Mistral-7B-Instruct-v0.2
