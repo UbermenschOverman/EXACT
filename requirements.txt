@@ -12,5 +12,8 @@ sympy>=1.12
 pyyaml>=5.1
 tqdm>=4.27
 
+# UI (optional)
+streamlit>=1.20.0
+
 # Testing
 pytest>=7.0.0

@@ -19,9 +19,27 @@ class FOLParser:
         """Parse a string into an AST Node."""
         s = s.strip()
         
-        # Handle broken unicode forall
+        # Normalize text aliases
         s = s.replace("forall", "∀")
         s = s.replace("->", "→")
+        s = s.replace("⟹", "→")
+        s = s.replace("implies", "→")
+
+        # Handle Python-style ForAll(x, Body) and Exists(x, Body)
+        # e.g. "ForAll(x, (A(x) → B(x)))" or "∀x (A(x) → B(x))"
+        m_fa = re.match(r'ForAll\s*\(\s*([a-z])\s*,\s*(.+)\)\s*$', s, re.DOTALL)
+        if m_fa:
+            var, body = m_fa.group(1), m_fa.group(2).strip()
+            return ForAll(Variable(var), self.parse_ast(body))
+
+        m_ex = re.match(r'Exists\s*\(\s*([a-z])\s*,\s*(.+)\)\s*$', s, re.DOTALL)
+        if m_ex:
+            var, body = m_ex.group(1), m_ex.group(2).strip()
+            return Exists(Variable(var), self.parse_ast(body))
+
+        # Broken unicode: "∃forall" artifacts
+        s = re.sub(r'[∃∀]forall', '∀', s)
+        s = re.sub(r'[∃]exists', '∃', s)
         
         # Strip outer parens if they exist and are matched
         if s.startswith('(') and s.endswith(')'):

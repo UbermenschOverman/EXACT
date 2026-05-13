@@ -1,14 +1,10 @@
 # tests/benchmark_physics_dataset.py
 """
 Physics Benchmark — routes through EndToEndOrchestrator.
-Reports granular failures: extraction, compilation, formula, solve.
+Granular failure categories + JSON diagnostics export.
 """
 
-import csv
-import math
-import os
-import sys
-
+import csv, json, math, os, sys, re
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.reasoning.solver import EndToEndOrchestrator
@@ -19,12 +15,13 @@ def run_benchmark(data_path: str, limit: int = 50):
 
     counters = {
         "total": 0,
-        "extraction_fail": 0,    # WorldModel has no quantities
-        "formula_fail": 0,       # no formula matched
-        "solve_fail": 0,         # formula matched but SymPy failed
-        "tol_match": 0,          # within 1% tolerance
-        "exact_match": 0,        # exact numeric match
+        "extraction_fail": 0,
+        "formula_fail": 0,
+        "solve_fail": 0,
+        "tol_match": 0,
+        "exact_match": 0,
     }
+    diagnostics = []
 
     with open(data_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -38,40 +35,51 @@ def run_benchmark(data_path: str, limit: int = 50):
             except (ValueError, KeyError):
                 continue
 
-            # Run full pipeline
             result = orchestrator.run_physics(question)
             counters["total"] += 1
 
+            diag = {
+                "id": row.get("id", ""),
+                "question": question[:80],
+                "expected": expected,
+                "predicted": result.answer,
+                "valid": result.valid,
+                "category": "unknown",
+            }
+
             if not result.valid:
-                # Classify failure
                 trace_actions = [t.get("action", "") for t in result.reasoning_trace]
-                if "world_model_vars" in trace_actions:
-                    # compilation ran but no formula found
-                    has_vars = any(
-                        "Flattened variables: {}" not in t.get("detail", "")
-                        for t in result.reasoning_trace
-                        if t.get("action") == "world_model_vars"
-                    )
-                    if has_vars:
-                        counters["formula_fail"] += 1
-                    else:
-                        counters["extraction_fail"] += 1
+                has_vars = any(
+                    t.get("action") == "canonicalize" and len(t.get("canonical", [])) > 0
+                    for t in result.reasoning_trace
+                )
+                if has_vars:
+                    counters["formula_fail"] += 1
+                    diag["category"] = "formula_fail"
                 else:
                     counters["extraction_fail"] += 1
-                continue
+                    diag["category"] = "extraction_fail"
+            else:
+                try:
+                    actual = float(result.answer.split()[0])
+                except (ValueError, IndexError):
+                    counters["solve_fail"] += 1
+                    diag["category"] = "solve_fail"
+                    diagnostics.append(diag)
+                    continue
 
-            # Parse numeric answer
-            try:
-                actual = float(result.answer.split()[0])
-            except (ValueError, IndexError):
-                counters["solve_fail"] += 1
-                continue
+                diag["actual_numeric"] = actual
+                if actual == expected:
+                    counters["exact_match"] += 1
+                    counters["tol_match"] += 1
+                    diag["category"] = "exact_match"
+                elif math.isclose(actual, expected, rel_tol=1e-2):
+                    counters["tol_match"] += 1
+                    diag["category"] = "tol_match"
+                else:
+                    diag["category"] = "wrong_answer"
 
-            if actual == expected:
-                counters["exact_match"] += 1
-                counters["tol_match"] += 1
-            elif math.isclose(actual, expected, rel_tol=1e-2):
-                counters["tol_match"] += 1
+            diagnostics.append(diag)
 
     n = counters["total"]
     print("\n══════════════════════════════════════════")
@@ -84,7 +92,14 @@ def run_benchmark(data_path: str, limit: int = 50):
         print(f"  Solve failures            : {counters['solve_fail']} ({counters['solve_fail']/n*100:.1f}%)")
         print(f"  Tolerance accuracy (1%)   : {counters['tol_match']} ({counters['tol_match']/n*100:.1f}%)")
         print(f"  Exact match accuracy      : {counters['exact_match']} ({counters['exact_match']/n*100:.1f}%)")
+        wrong = n - counters['extraction_fail'] - counters['formula_fail'] - counters['solve_fail'] - counters['tol_match']
+        print(f"  Wrong answer (numeric)    : {max(0,wrong)} ({max(0,wrong)/n*100:.1f}%)")
     print("══════════════════════════════════════════")
+
+    os.makedirs("outputs", exist_ok=True)
+    with open("outputs/physics_diagnostics.json", "w") as f:
+        json.dump({"counters": counters, "details": diagnostics}, f, indent=2, ensure_ascii=False)
+    print(f"  Diagnostics → outputs/physics_diagnostics.json")
 
 
 if __name__ == "__main__":

@@ -1,228 +1,237 @@
-# EXACT — Explainable Automated Chain-of-Thought
+# EXACT — Neuro-Symbolic Reasoning Engine
 
-A neural-symbolic reasoning pipeline that combines **Large Language Models** with **formal logic solvers** to produce verifiable, explainable answers.
+**EXACT** (EXplainable Automated Compositional Thinking) is a deterministic neuro-symbolic reasoning engine that solves educational physics problems and propositional logic queries using structured symbolic pipelines — without relying on LLMs for answer generation.
 
-The system translates natural language questions into **First-Order Logic (FOL)**, solves them with symbolic engines (SymPy), generates proof traces, and produces human-readable explanations — all with built-in verification and retry mechanisms.
+## Philosophy
 
----
+EXACT follows a strict **deterministic-first** design:
 
-## Architecture Overview
+1. **LLM is never the answer generator** — it can only translate natural language → structured IR (optional, OFF by default)
+2. **All reasoning is symbolic** — SymPy for algebra, forward chaining for logic, DAG for multi-step derivation
+3. **Every answer is traceable** — full derivation trace from input to output
 
 ```
-Input Question
-      │
-      ▼
-┌───────────────┐
-│ LLM Classifier│  Identify: Physics | Logic | General
-└───────┬───────┘
-        │
-  ┌─────┼────────────┐
-  ▼     ▼            ▼
-Physics Logic      General
-Solver  Solver     Pipeline
-  │     │            │
-  ▼     ▼            ▼
-┌───────────────┐
-│   Verifier    │  Numerical Sanity & Unit Consistency Check
-└───────┬───────┘
-        │
-        ▼
-┌───────────────┐
-│ LLM Explainer │  Generate natural language explanation
-└───────┬───────┘
-        │
-        ▼
-  Unified ReasoningOutput
+Natural Language Question
+        ↓
+   SemanticCompiler (NL → WorldModel)
+        ↓
+   VariableCanonicalizer (alias → formula variable)
+        ↓
+   DerivationGraph / PhysicsSolver / LogicSolver
+        ↓
+   Verified Answer + Trace
 ```
 
----
+## Architecture
+
+### Core Components
+
+| Component | File | Role |
+|:---|:---|:---|
+| SemanticCompiler | `src/reasoning/semantic_compiler.py` | Text → WorldModel (3-layer: structural + narrative + LLM) |
+| NarrativeExtractor | `src/reasoning/narrative_extractor.py` | Token-window extraction for natural language quantities |
+| WorldModel | `src/reasoning/world_model.py` | Unified IR for physics + logic problems |
+| VariableCanonicalizer | `src/reasoning/variable_canonicalizer.py` | Maps `U→V`, `C→capacitance`, `I→current` |
+| DerivationGraph | `src/reasoning/derivation_graph.py` | Multi-step DAG-based physics planner |
+| PhysicsSolver | `src/reasoning/physics_solver.py` | SymPy-based formula solver |
+| FormulaBank | `src/reasoning/formula_bank.py` | Registry of physics formulas |
+| QuestionTranslator | `src/reasoning/question_translator.py` | 3-layer NL→FOL (rule → heuristic → LLM) |
+| Ontology | `src/reasoning/ontology.py` | 120+ predicate aliases, MCQ triggers |
+| FOLParser | `src/reasoning/parser.py` | Unicode + Python-style FOL parser |
+| PremiseGraph | `src/reasoning/premise_graph.py` | Forward chaining with conjunction rules |
+| MCQSolver | `src/reasoning/mcq_solver.py` | MCQ scoring via proof derivability |
+| LogicSolver | `src/reasoning/logic_solver.py` | Entailment evaluation |
+| Orchestrator | `src/reasoning/solver.py` | Routes physics/logic through full pipeline |
+
+### Pipeline Diagrams
+
+**Physics Pipeline:**
+```
+Raw Text → StructuralExtractor → NarrativeExtractor → OntologyNormalizer
+                                      ↓
+                                  WorldModel
+                                      ↓
+                           VariableCanonicalizer
+                                      ↓
+                              DerivationGraph (DAG)
+                                      ↓
+                              PhysicsSolver (SymPy)
+                                      ↓
+                              Answer + Trace
+```
+
+**Logic Pipeline:**
+```
+JSON Item → QuestionTranslator → Ontology → MCQ/Entailment Goal
+                                      ↓
+                                  WorldModel
+                                      ↓
+                              FOLParser → PremiseGraph
+                                      ↓
+                              Forward Chain → Derivable Facts
+                                      ↓
+                              MCQSolver / LogicSolver
+                                      ↓
+                              Answer + Trace
+```
+
+## Installation
+
+```bash
+# Create environment
+conda create -n exact python=3.11 -y
+conda activate exact
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Optional: install Streamlit for UI
+pip install streamlit
+```
+
+### Requirements
+
+- Python 3.11+
+- PyTorch ≥ 2.0 (for optional LLM compiler)
+- SymPy ≥ 1.12
+- Streamlit (optional, for UI)
+
+## Running
+
+### Interactive UI
+```bash
+streamlit run app.py
+```
+
+### Benchmarks
+```bash
+# Physics benchmark (50 problems)
+python tests/benchmark_physics_dataset.py
+
+# Logic benchmark (50 items, 93 questions)
+python tests/test_logic_dataset_benchmark.py
+```
+
+### Tests
+```bash
+pytest tests/ -v
+```
+
+### Programmatic Usage
+```python
+from src.reasoning.solver import EndToEndOrchestrator
+
+orch = EndToEndOrchestrator()
+
+# Physics
+result = orch.run_physics("R = 5 Ω, I = 2 A. Find V.")
+print(result.answer)  # "10 V"
+
+# Logic
+item = {
+    "premises-FOL": ["∀x (WT(x) → O(x))", "WT(Alice)"],
+    "questions": ["Does Alice qualify as optimized?"],
+    "answers": ["Yes"]
+}
+result = orch.run_logic(item)
+print(result.answer)  # "Yes" or "A"
+```
 
 ## Project Structure
 
 ```
 EXACT/
-├── run.py                          # Main entry point (config-driven)
-├── requirements.txt                # Python dependencies
+├── app.py                          # Streamlit interactive UI
+├── run.py                          # Batch inference entry point
+├── requirements.txt
 ├── config/
-│   └── base.yaml                   # Runtime configuration (model path, generation params)
+│   ├── base.yaml                   # LLM config (model path, quantization)
+│   ├── physics.yaml                # Physics-specific settings
+│   └── logic.yaml                  # Logic-specific settings
 ├── data/
-│   └── sample.json                 # Input dataset (list of questions)
-├── models/
-│   └── mistral/
-│       └── Mistral-7B-Instruct-v0.2/   # Local model weights
-├── scripts/
-│   └── test_model.py               # Quick model sanity check
+│   ├── Physics_Problems_Text_Only.csv   # 50 physics problems
+│   └── Logic_Based_Educational_Queries.json  # 50 logic items
 ├── src/
-│   ├── config.py                   # Hardcoded config (fallback)
-│   ├── pipeline.py                 # Pipeline orchestration (single/batch mode)
-│   ├── orchestrator.py             # Core 6-step reasoning loop with retry
-│   ├── evaluator.py                # Multi-metric evaluation (P1/P2/P3)
-│   ├── llm/
-│   │   ├── models.py               # LLM loading (HuggingFace, GPU auto-detect)
-│   │   ├── generate.py             # Generation wrapper with caching
-│   │   ├── prompt.py               # Prompt templates (Planner, FOL, Explainer)
-│   │   ├── planner.py              # Step decomposition via LLM
-│   │   ├── translator.py           # NL → FOL translation via LLM
-│   │   ├── explainer.py            # Proof → explanation via LLM
-│   │   └── test_llm.py             # LLM integration test
-│   ├── reasoning/
-│   │   ├── fol.py                  # FOL data structures (Predicate, Implication, Quantifier)
-│   │   ├── parser.py               # FOL string parser
-│   │   ├── solver.py               # Symbolic solver (SymPy)
-│   │   ├── proof.py                # Proof trace generator
-│   │   └── verifier.py             # Answer-proof consistency checker
-│   └── utils/
-│       ├── cache.py                # MD5-based JSON file cache
-│       ├── config_loader.py        # YAML config loader with merge support
-│       ├── device.py               # GPU detection utilities
-│       ├── io.py                   # JSON/JSONL read/write helpers
-│       ├── json_utils.py           # Safe JSON extraction from LLM output
-│       ├── logging.py              # File + console logger
-│       ├── seed.py                 # Reproducibility seed setter
-│       └── timer.py                # Execution timer
-├── outputs/                        # Generated predictions & metrics
-├── cache/                          # LLM response cache (auto-generated)
-└── logs/                           # Runtime logs (auto-generated)
+│   └── reasoning/
+│       ├── semantic_compiler.py     # Central grounding layer
+│       ├── narrative_extractor.py   # Token-window quantity extraction
+│       ├── world_model.py           # Unified intermediate representation
+│       ├── variable_canonicalizer.py # Variable alias bridging
+│       ├── derivation_graph.py      # Multi-step DAG planner
+│       ├── physics_solver.py        # SymPy formula solver
+│       ├── formula_bank.py          # Formula registry
+│       ├── question_translator.py   # NL → FOL target converter
+│       ├── ontology.py              # Predicate aliases + MCQ triggers
+│       ├── parser.py                # FOL parser
+│       ├── premise_graph.py         # Forward chaining engine
+│       ├── mcq_solver.py            # MCQ scoring
+│       ├── logic_solver.py          # Entailment evaluation
+│       ├── solver.py                # EndToEndOrchestrator
+│       └── llm_compiler.py          # Optional LLM bridge (OFF by default)
+├── tests/
+│   ├── benchmark_physics_dataset.py
+│   ├── test_logic_dataset_benchmark.py
+│   ├── test_semantic_compiler.py
+│   ├── test_question_translator.py
+│   ├── test_variable_canonicalizer.py
+│   └── test_variable_extractor_dataset.py
+├── outputs/                         # Benchmark diagnostics (JSON)
+└── docs/
+    └── system_audit.md
 ```
 
----
+## Benchmarks
 
-## Quick Start
+### Physics Dataset
+- 50 educational physics problems (capacitors, Coulomb's law, Ohm's law, power)
+- Metrics: extraction success, formula match, tolerance accuracy (1%), exact match
+- Current performance: **6% tolerance accuracy**, **18% extraction failure**
 
-### 1. Environment Setup
+### Logic Dataset
+- 50 items, 93 total questions (45 MCQ + 48 Yes/No)
+- Metrics: premise parse rate, FOL target coverage, MCQ canonicalization, accuracy
+- Current performance: **6.5% overall accuracy**, **98% premise parse**, **64.6% FOL target coverage**
 
+### Running Diagnostics
 ```bash
-conda activate exact
-pip install -r requirements.txt
+python tests/benchmark_physics_dataset.py  # → outputs/physics_diagnostics.json
+python tests/test_logic_dataset_benchmark.py  # → outputs/logic_diagnostics.json
 ```
 
-**Dependencies:** `torch` (CUDA), `transformers`, `accelerate`, `safetensors`, `sentencepiece`, `sympy`, `pyyaml`, `tqdm`
+## LLM Compiler (Optional)
 
-### 2. Run Full Pipeline
+The LLM compiler is a **constrained translation-only** bridge:
 
-```bash
-python run.py --config config/base.yaml
-```
+- **OFF by default** (`use_llm_compiler: false`)
+- LLM may ONLY translate NL → structured IR (JSON)
+- LLM may NEVER directly answer questions
+- Output must conform to strict JSON schemas (`llm_contracts.py`)
+- Deterministic solvers remain authoritative
 
-This will:
-- Load dataset from `data/sample.json`
-- Load model from the path specified in `config/base.yaml`
-- Process each question through the 6-step reasoning pipeline
-- Cache results to avoid re-computation
-- Evaluate with P1/P2/P3 metrics
-- Save predictions to `outputs/predictions.json`
-- Save metrics to `outputs/predictions.json.metrics.json`
-
-### 3. Quick Model Test
-
-```bash
-python scripts/test_model.py
-```
-
-Loads the model and runs a single prompt — useful for verifying GPU setup and model loading.
-
----
-
-## Configuration
-
-### `config/base.yaml`
-
+To enable:
 ```yaml
-data_path: data/sample.json        # Input data
-task_type: qa                       # Dataset type: qa | fol | physics
-output_path: outputs/predictions.json
-cache_dir: cache/
-
+# config/base.yaml
 llm:
-  model_path: /path/to/model        # Absolute path to local HuggingFace model
-  use_4bit: true                     # Quantization flag (not yet implemented)
-  max_new_tokens: 256                # Max generation length
-  temperature: 0.7                   # Sampling temperature
-  top_p: 0.9                         # Nucleus sampling threshold
+  model_path: /path/to/model
+  use_4bit: true
 ```
 
----
-
-## Key Components
-
-### Orchestrator (`src/orchestrator.py`)
-
-The central reasoning loop classifies questions and routes them to appropriate solvers:
-
-| Solver | Used For | Mechanism |
-|--------|----------|-----------|
-| **Physics Solver** | Numerical physics problems | Hybrid regex/LLM variable extraction + Formula Bank + SymPy computation |
-| **Logic Solver** | Deductive logic problems | LLM premise extraction + Premise Graph + Forward Chaining |
-| **General Solver** | Fallback & Definitions | LLM step planning + Best-effort FOL translation |
-
-The output from any solver is passed to the **Verifier** for multi-layer validation (numerical sanity, unit consistency, reasoning consistency). If verified (or high confidence), the **LLM Explainer** generates a human-readable explanation.
-
-### Evaluator (`src/evaluator.py`)
-
-Four evaluation metrics, each normalized to `[0, 1]`:
-
-| Metric | What it measures |
-|--------|------------------|
-| **P1 — Accuracy** | Output match against reference (with numerical tolerance) |
-| **P2 — Explanation** | Heuristic quality: length, reasoning keywords, structure |
-| **P3 — Reasoning** | Presence of structured artifacts: formal representation, proof steps, premise tracking |
-| **P4 — Trace** | Completeness of the step-by-step reasoning trace based on the question type |
-
-### LLM Layer (`src/llm/`)
-
-- **`models.py`** — Loads HuggingFace models with `device_map="auto"` for multi-GPU, `float16` precision
-- **`generate.py`** — Wraps generation with MD5-based file caching to avoid redundant API/inference calls
-- **`prompt.py`** — Structured JSON prompt templates that enforce output format
-
-### Data Layer (`src/data/`)
-
-Supports 3 dataset types via `task_type` config:
-
-| Type | Schema | Fields |
-|------|--------|--------|
-| `qa` | `QASample` | `question`, `answer`, `explanation` |
-| `fol` | `FOLSample` | + `fol` (ground truth FOL) |
-| `physics` | `PhysicsSample` | + `reasoning`, `formula` |
-
-### Input Format
-
-```json
-[
-    {"question": "What is Ohm's law?"},
-    {"question": "Calculate current if V=10V and R=5 ohm.", "answer": "2A"}
-]
+```python
+orch = EndToEndOrchestrator(llm=your_llm, use_llm_compiler=True)
 ```
 
----
+## Current Limitations (Honest Assessment)
 
-## GPU Support
+1. **Multi-body vector composition**: 3-body Coulomb with arbitrary angles only partially supported (scalar magnitude, not full vector decomposition)
+2. **Conditional MCQ options**: "If A then B" options are parsed to FOL implications but proof scoring is still heuristic
+3. **Logic Yes/No accuracy**: FOL target extraction works for 64.6% of questions, but the proof engine needs deeper contrapositive/resolution support
+4. **Narrative extraction**: Handles 80%+ of common patterns; some complex phrasing still fails
+5. **Formula bank**: Limited to ~10 core physics formulas; needs expansion for broader coverage
 
-The codebase auto-detects CUDA and configures accordingly:
+## Future Work
 
-| Setting | GPU Available | CPU Fallback |
-|---------|--------------|--------------|
-| Model dtype | `float16` | `float32` |
-| Device mapping | `device_map="auto"` (multi-GPU) | Manual `.to("cpu")` |
-| Input tensors | Sent to `model.device` | CPU |
-
-**Tested hardware:** RTX 3090 Ti (24GB), TITAN V (12GB), RTX 3060 (12GB)
-
----
-
-## Output Format
-
-Each prediction is a dict:
-
-```json
-{
-    "question": "Calculate current if V=10V and R=5 ohm.",
-    "steps": ["Identify known variables", "Apply Ohm's law: I = V/R"],
-    "fol": "Implies(And(V=10, R=5), I=V/R)",
-    "parsed": {"type": "implication", "premise": "...", "conclusion": "..."},
-    "answer": "2",
-    "proof": ["Given premise: ...", "If premise holds, then: ...", "Result: 2"],
-    "explanation": "Using Ohm's law, I = V/R = 10/5 = 2A.",
-    "valid": true,
-    "attempt": 0
-}
-```
+- **Full vector reasoning**: 2D/3D force decomposition with angle components
+- **Theorem proving**: Resolution-based prover for deeper logic inference
+- **Graph neural retrieval**: Learned formula/premise retrieval from large banks
+- **Probabilistic logic**: Soft inference for uncertain premises
+- **Knowledge graph**: Structured physics ontology for concept bridging

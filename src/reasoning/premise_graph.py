@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Optional, Set, Tuple
 from collections import deque
-from src.reasoning.fol import ASTNode, ForAll, Implication, Predicate, Negation, Variable, Constant
+from src.reasoning.fol import ASTNode, ForAll, Implication, Predicate, Negation, Conjunction, Variable, Constant
 
 class PremiseNode:
     def __init__(self, premise_id: str, ast: ASTNode, is_given: bool = True):
@@ -53,38 +53,69 @@ class PremiseGraph:
         while changed:
             changed = False
             current_nodes = list(self.premises.values())
-            
-            # Find rules: ForAll(x, Implication(A, B))
-            rules = [n for n in current_nodes if isinstance(n.ast, ForAll) and isinstance(n.ast.statement, Implication)]
-            
-            # Find facts: Predicate or Negation(Predicate) where args are Constants
-            facts = [n for n in current_nodes if isinstance(n.ast, (Predicate, Negation))]
+
+            # Rules: ForAll(x, Implication(A, B))
+            rules = [n for n in current_nodes
+                     if isinstance(n.ast, ForAll)
+                     and isinstance(n.ast.statement, Implication)]
+
+            # Facts: atomic Predicate or Negation(Predicate) with Constant args
+            facts = [n for n in current_nodes
+                     if isinstance(n.ast, (Predicate, Negation))]
 
             for rule_node in rules:
                 rule = rule_node.ast.statement
                 condition = rule.premise
                 conclusion = rule.conclusion
 
-                for fact_node in facts:
-                    # Try to unify fact with rule condition
-                    fact_ast = fact_node.ast
-                    cond_ast = condition
-                    
-                    # Handle negations matching
-                    if isinstance(fact_ast, Negation) and isinstance(cond_ast, Negation):
-                        subst = self.unify(fact_ast.statement, cond_ast.statement)
-                    elif not isinstance(fact_ast, Negation) and not isinstance(cond_ast, Negation):
-                        subst = self.unify(fact_ast, cond_ast)
-                    else:
-                        subst = None
+                # Expand Conjunction conditions: both conjuncts must be in facts
+                if isinstance(condition, Conjunction):
+                    cond_list = self._flatten_conjunction(condition)
+                else:
+                    cond_list = [condition]
 
+                for fact_node in facts:
+                    fact_ast = fact_node.ast
+
+                    # Only handle single-condition implications for now
+                    # (Conjunction handling requires multiple fact matching)
+                    if len(cond_list) > 1:
+                        # All conjuncts must unify with some existing fact
+                        subst = {}
+                        all_match = True
+                        for cond in cond_list:
+                            matched = False
+                            for fn in current_nodes:
+                                if not isinstance(fn.ast, (Predicate, Negation)):
+                                    continue
+                                s = self._try_unify(fn.ast, cond)
+                                if s is not None:
+                                    subst.update(s)
+                                    matched = True
+                                    break
+                            if not matched:
+                                all_match = False
+                                break
+                        if all_match:
+                            new_ast = self.apply_subst(conclusion, subst)
+                            new_text = str(new_ast)
+                            if not any(n.text == new_text for n in self.premises.values()):
+                                new_id = f"D{self.pid_counter}"
+                                self.pid_counter += 1
+                                new_node = self.add_premise(new_id, new_ast, is_given=False)
+                                new_node.derived_from = [rule_node.premise_id, fact_node.premise_id]
+                                derived_ids.append(new_id)
+                                self._used_premises.add(rule_node.premise_id)
+                                changed = True
+                        continue
+
+                    # Single condition
+                    cond_ast = cond_list[0]
+                    subst = self._try_unify(fact_ast, cond_ast)
                     if subst is not None:
                         new_ast = self.apply_subst(conclusion, subst)
                         new_text = str(new_ast)
-                        
-                        # Check if we already have this
-                        exists = any(n.text == new_text for n in self.premises.values())
-                        if not exists:
+                        if not any(n.text == new_text for n in self.premises.values()):
                             new_id = f"D{self.pid_counter}"
                             self.pid_counter += 1
                             new_node = self.add_premise(new_id, new_ast, is_given=False)
@@ -95,6 +126,23 @@ class PremiseGraph:
                             changed = True
 
         return derived_ids
+
+    def _flatten_conjunction(self, conj) -> list:
+        """Flatten (A ∧ B ∧ C) into [A, B, C]."""
+        from src.reasoning.fol import Conjunction
+        if isinstance(conj, Conjunction):
+            return self._flatten_conjunction(conj.left) + self._flatten_conjunction(conj.right)
+        return [conj]
+
+    def _try_unify(self, fact_ast, cond_ast) -> Optional[Dict]:
+        """Try to unify a fact with a condition; handles Predicate and Negation."""
+        if isinstance(fact_ast, Negation) and isinstance(cond_ast, Negation):
+            if isinstance(fact_ast.statement, Predicate) and isinstance(cond_ast.statement, Predicate):
+                return self.unify(fact_ast.statement, cond_ast.statement)
+        elif isinstance(fact_ast, Predicate) and isinstance(cond_ast, Predicate):
+            return self.unify(fact_ast, cond_ast)
+        return None
+
 
     def detect_contradiction(self) -> Optional[str]:
         texts = {}

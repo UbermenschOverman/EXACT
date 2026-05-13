@@ -3,57 +3,51 @@
 SemanticCompiler — the central grounding layer for EXACT.
 
 Pipeline:
-  RAW TEXT
-    ↓ Layer A: Structural Extraction (improved regex + token windows)
-    ↓ Layer B: Ontology Normalization
-    ↓ Layer C: LLM Compiler (optional fallback, OFF by default)
+  RAW TEXT / DICT
+    ↓ Layer A1: Structural Extraction (explicit Var = Value Unit)
+    ↓ Layer A2: Narrative Extraction (token-window, noun→quantity)
+    ↓ Layer B:  Ontology Normalization
+    ↓ Layer C:  LLM Compiler (optional, OFF by default)
   WorldModel
 
 The SemanticCompiler is the ONLY component allowed to touch raw text.
-After it returns a WorldModel, all downstream components operate
-exclusively on that structured representation.
 """
 
 import re
 import logging
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.reasoning.world_model import WorldModel, Quantity, MCQOption, Goal
 from src.reasoning.ontology import (
-    SI_PREFIXES, PHYSICS_VARIABLE_ALIASES, CANONICAL_UNITS,
-    PREDICATE_ALIASES, question_to_fol_target, normalize_variable
+    SI_PREFIXES, PREDICATE_ALIASES, question_to_fol_target,
+    canonicalize_predicate_phrase, normalize_variable, CANONICAL_UNITS,
 )
 from src.reasoning.physics_scene_builder import PhysicsSceneBuilder
+from src.reasoning.question_translator import QuestionTranslator
+from src.reasoning.narrative_extractor import NarrativeExtractor
 
 logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LAYER A helpers — structural extraction
+# LAYER A1 — Structural Extraction (explicit Var = Value Unit)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StructuralExtractor:
-    """
-    Layer A: token-window and regex extraction.
-    Handles both:
-      (a) explicit format: "q1 = 6 × 10^-8 C"
-      (b) narrative format: "a charge of 6 × 10^-8 C at point A"
-    """
+    """Handles explicit format: q1 = 6e-8 C, C = 100 μF, U = 30 V."""
 
-    # Comprehensive value pattern:
-    # Matches: 6e-8, 6×10^-8, 6*10^-8, 6x10^-8, 6·10⁻⁸, 100, 100.5
+    _SUPERS = {'⁻': '-', '⁺': '+', '⁰': '0', '¹': '1', '²': '2', '³': '3',
+               '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9'}
+
     _VALUE = (
-        r'([-+]?\d+(?:\.\d+)?)'                       # base number
+        r'([-+]?\d+(?:\.\d+)?)'
         r'(?:'
-        r'\s*[×x\*·]\s*10\s*[\^]\s*([-+]?\d+)'       # × 10^exp
-        r'|[eE]([-+]?\d+)'                             # e-notation
-        r'|'                                            # superscript unicode
+        r'\s*[×x\*·]\s*10\s*[\^]\s*([-+]?\d+)'
+        r'|[eE]([-+]?\d+)'
+        r'|'
         r'\s*[×x\*·]\s*10\s*((?:[⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+))'
         r')?'
     )
-    _SUPERS = {'⁻': '-', '⁺': '+', '⁰': '0', '¹': '1', '²': '2', '³': '3',
-               '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9'}
 
     _UNIT_PATTERNS = [
         (r'C|coulomb(?:s)?',   'C'),
@@ -64,12 +58,10 @@ class StructuralExtractor:
         (r'F|farad(?:s)?',     'F'),
         (r'J|joule(?:s)?',     'J'),
         (r'N|newton(?:s)?',    'N'),
-        (r'm|meter(?:s)?',     'm'),
     ]
 
-    def _parse_value(self, base: str, exp_hat: str,
-                     exp_e: str, exp_uni: str) -> float:
-        val = float(base)
+    def _parse_value(self, base, exp_hat, exp_e, exp_uni):
+        val = float(base) if base else 1.0
         exp = 0
         if exp_hat:
             exp = int(exp_hat)
@@ -80,16 +72,9 @@ class StructuralExtractor:
         return val * (10 ** exp)
 
     def extract_quantities(self, text: str) -> List[Tuple[str, float, str]]:
-        """
-        Returns list of (raw_name, numeric_value, canonical_unit).
-        Handles both 'q1 = 6e-8 C' and 'a charge of 6e-8 C'.
-        """
         results: List[Tuple[str, float, str]] = []
-
         for unit_pat, canon_unit in self._UNIT_PATTERNS:
             prefix_pat = r'([TGMkmμuncp]?)'
-
-            # (1) Explicit: VarName = Value [prefix]Unit
             explicit = (
                 r'([A-Za-z][A-Za-z0-9_]*)\s*=\s*'
                 + self._VALUE + r'\s*' + prefix_pat + r'(' + unit_pat + r')\b'
@@ -100,46 +85,10 @@ class StructuralExtractor:
                 prefix = m.group(6)
                 if prefix and prefix in SI_PREFIXES:
                     val *= SI_PREFIXES[prefix]
-                canon_name = normalize_variable(raw_name)
-                results.append((canon_name, val, canon_unit))
-
-            # (2) Narrative: "a charge of X [prefix]Unit" / "X [prefix]Unit charge"
-            # Common NL patterns for each unit type
-            if canon_unit == 'C':
-                narrative_labels = ['charge', 'q']
-            elif canon_unit == 'V':
-                narrative_labels = ['voltage', 'potential', 'emf']
-            elif canon_unit == 'Ω':
-                narrative_labels = ['resistance', 'resistor']
-            elif canon_unit == 'F':
-                narrative_labels = ['capacitance', 'capacitor']
-            elif canon_unit == 'N':
-                narrative_labels = ['force']
-            elif canon_unit == 'm':
-                narrative_labels = []  # distances handled separately
-            else:
-                narrative_labels = []
-
-            for label in narrative_labels:
-                narr = (
-                    r'(?:' + label + r'(?:\s+of)?|of\s+' + label + r')\s*'
-                    + self._VALUE + r'\s*' + prefix_pat + r'(' + unit_pat + r')\b'
-                )
-                for m in re.finditer(narr, text, re.IGNORECASE):
-                    val = self._parse_value(m.group(1), m.group(2), m.group(3), m.group(4))
-                    prefix = m.group(5)
-                    if prefix and prefix in SI_PREFIXES:
-                        val *= SI_PREFIXES[prefix]
-                    # Counter-based naming for multiple narrative quantities
-                    results.append((label, val, canon_unit))
-
+                results.append((raw_name, val, canon_unit))
         return results
 
     def extract_named_charges(self, text: str) -> List[Tuple[str, float, str]]:
-        """
-        Specifically extract 'q1 = 6 × 10^-8 C', 'qA = 5 μC', etc.
-        Named charges preserve their index (q1, q2, qA, qB).
-        """
         results = []
         pattern = (
             r'\b(q[A-Za-z0-9]+)\s*=\s*'
@@ -157,39 +106,52 @@ class StructuralExtractor:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LAYER B — Ontology normalization
+# LAYER B — Ontology Normalization
 # ─────────────────────────────────────────────────────────────────────────────
 
 class OntologyNormalizer:
-    """
-    Layer B: map extracted surface forms to canonical ontology entries.
-    """
+    _TARGET_MAP = [
+        (["force", "resultant", "net force"], "F"),
+        (["energy", "stored energy", "work"], "energy"),
+        (["capacitance"], "capacitance"),
+        (["voltage", "potential difference", "emf"], "V"),
+        (["current"], "current"),
+        (["resistance"], "R"),
+        (["charge"], "charge"),
+        (["power"], "P"),
+    ]
 
     def detect_target(self, text: str) -> Optional[str]:
-        """Heuristic target detection from question text."""
         t = text.lower()
-        if any(k in t for k in ["force", "resultant", "net force"]):
-            return "F"
-        if any(k in t for k in ["energy", "stored energy", "work"]):
-            return "energy"
-        if any(k in t for k in ["capacitance"]):
-            return "capacitance"
-        if any(k in t for k in ["voltage", "potential difference", "emf"]):
-            return "V"
-        if any(k in t for k in ["current"]):
-            return "current"
-        if any(k in t for k in ["resistance"]):
-            return "R"
-        if any(k in t for k in ["charge", "find q", "determine q"]):
-            return "charge"
-        if any(k in t for k in ["power"]):
-            return "P"
-        return None
 
-    def normalize_predicate_phrase(self, phrase: str) -> Optional[str]:
-        """Return canonical FOL predicate for an NL phrase."""
-        key = phrase.lower().strip()
-        return PREDICATE_ALIASES.get(key)
+        # Strategy 1: find the noun near a question keyword
+        # "Find the X", "What is the X", "Calculate X", "Determine X"
+        import re
+        question_pats = [
+            r'(?:find|calculate|determine|compute|what is)\s+(?:the\s+)?(\w[\w\s]*?)(?:\?|\.|$|,)',
+        ]
+        for pat in question_pats:
+            m = re.search(pat, t)
+            if m:
+                target_phrase = m.group(1).strip()
+                for keywords, var in self._TARGET_MAP:
+                    if any(kw in target_phrase for kw in keywords):
+                        return var
+
+        # Strategy 2: fallback — check full text, but prioritize later sentences
+        # Split on periods/question marks to find the question sentence
+        sentences = re.split(r'[.?]', t)
+        question_sentence = sentences[-1] if sentences else t
+        for keywords, var in self._TARGET_MAP:
+            if any(kw in question_sentence for kw in keywords):
+                return var
+
+        # Strategy 3: full-text scan
+        for keywords, var in self._TARGET_MAP:
+            if any(kw in t for kw in keywords):
+                return var
+
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,46 +159,43 @@ class OntologyNormalizer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SemanticCompiler:
-    """
-    Central grounding layer.
-
-    Usage:
-        compiler = SemanticCompiler(llm_compiler=None)   # pure deterministic
-        wm = compiler.compile_physics("Two charges q1=6e-8 C...")
-        wm = compiler.compile_logic(dataset_item)
-    """
+    """Central grounding layer. Single source of truth for text → WorldModel."""
 
     def __init__(self, llm_compiler=None):
         self.extractor = StructuralExtractor()
+        self.narrative = NarrativeExtractor()
         self.normalizer = OntologyNormalizer()
         self.scene_builder = PhysicsSceneBuilder()
-        self.llm = llm_compiler   # None → LLM path is skipped
+        self.translator = QuestionTranslator(llm_compiler)
+        self.llm = llm_compiler
 
     # ── Physics compilation ────────────────────────────────────────────
 
     def compile_physics(self, text: str) -> WorldModel:
         wm = WorldModel(raw_text=text, problem_type="physics")
-        method = "structural"
 
-        # Layer A — structural extraction
+        # Layer A1 — explicit extraction (highest confidence)
         named_charges = self.extractor.extract_named_charges(text)
         all_quantities = self.extractor.extract_quantities(text)
 
-        # Populate named charges as separate entities
-        charge_counter = 1
         for name, val, unit in named_charges:
             wm.set_quantity(name, "value", val, unit, "explicit")
 
-        # Populate remaining quantities
-        # De-duplicate: if a named charge q1 already covers a value, skip generic
-        added_generic_charge = False
+        charge_counter = 1
         for raw_name, val, unit in all_quantities:
             if raw_name in ("charge", "q") and named_charges:
-                continue  # named charges already handled
-            ent_name = raw_name if raw_name not in ("charge", "q") else f"q{charge_counter}"
+                continue
+            ent_name = raw_name if raw_name not in ("charge", "q") \
+                       else f"q{charge_counter}"
             if raw_name in ("charge", "q"):
                 charge_counter += 1
             wm.set_quantity(ent_name, "value", val, unit, "explicit")
+
+        # Layer A2 — narrative extraction (fills gaps)
+        narrative_hits = self.narrative.extract(text)
+        for hit in narrative_hits:
+            if hit.name not in wm.flat_quantities():
+                wm.set_quantity(hit.name, "value", hit.value, hit.unit, "narrative")
 
         # Layer B — detect goal / target
         target = self.normalizer.detect_target(text)
@@ -248,28 +207,22 @@ class SemanticCompiler:
             llm_out = self.llm.compile_physics(text)
             if llm_out:
                 self._apply_llm_physics(wm, llm_out)
-                method = "llm"
+                wm.compilation_method = "llm"
             else:
-                method = "structural_fallback"
+                wm.compilation_method = "failed"
         else:
-            method = "structural" if wm.entities else "failed"
+            wm.compilation_method = "structural" if wm.entities else "failed"
 
-        wm.compilation_method = method
         wm.compilation_confidence = 1.0 if wm.entities else 0.0
-
-        # Scene builder — geometry enrichment
         self.scene_builder.enrich(wm)
-
         return wm
 
     def _apply_llm_physics(self, wm: WorldModel, llm_out: Dict[str, Any]):
-        """Merge LLM JSON output into WorldModel."""
         for ent in llm_out.get("entities", []):
-            name = ent.get("name", "unknown")
             val = ent.get("value")
-            unit = ent.get("unit")
             if val is not None:
-                wm.set_quantity(name, "value", float(val), unit, "llm")
+                wm.set_quantity(ent.get("name", "?"), "value",
+                               float(val), ent.get("unit"), "llm")
         for rel in llm_out.get("relations", []):
             val = rel.get("value")
             q = Quantity(float(val), rel.get("unit")) if val is not None else None
@@ -282,78 +235,100 @@ class SemanticCompiler:
     # ── Logic compilation ──────────────────────────────────────────────
 
     def compile_logic(self, item: Dict[str, Any]) -> WorldModel:
-        """
-        Build a WorldModel from a logic dataset item.
-        item has keys: premises-FOL, premises-NL, questions, answers
-        """
         wm = WorldModel(problem_type="logic")
 
-        # Premises are pre-FOL in this dataset — directly use them
         premises_fol: List[str] = item.get("premises-FOL", [])
         wm.premises_fol = premises_fol
-        wm.raw_text = "; ".join(item.get("premises-NL", []))
 
         questions: List[str] = item.get("questions", [])
         if not questions:
             return wm
 
-        # Process each question into a Goal
-        for q_text in questions:
-            task_type, fol_target = question_to_fol_target(q_text)
-            wm.raw_text = q_text  # last question is the context
+        q_text = questions[0]
+        wm.raw_text = q_text
 
-            if task_type == "mcq":
+        # Stem-only translation to prevent option text triggering false matches
+        q_stem = q_text.split("\n")[0].strip()
+        trans = self.translator.translate(q_stem, premises_fol)
+
+        if trans.task_type == "mcq":
+            goal = Goal("mcq", "__mcq__")
+            self._extract_mcq_options(q_text, goal)
+            wm.goals.append(goal)
+
+        elif trans.task_type == "entailment" and trans.fol_target:
+            wm.goals.append(Goal("entailment", trans.fol_target))
+
+        else:
+            # Structural MCQ fallback: A./B./C. in full text
+            if re.search(r'\b[A-D]\.', q_text):
                 goal = Goal("mcq", "__mcq__")
-                # Extract MCQ options A/B/C/D
-                for m in re.finditer(r'\b([A-D])\.\s*(.+?)(?=\s+[A-D]\.|$)',
-                                     q_text, re.DOTALL):
-                    opt_id, opt_text = m.group(1), m.group(2).strip()
-                    # Try to canonicalize option text to FOL
-                    fol_opt = self._canonicalize_option(opt_text)
-                    goal.options.append(MCQOption(opt_id, opt_text, fol_opt))
+                self._extract_mcq_options(q_text, goal)
                 wm.goals.append(goal)
-
-            elif task_type == "entailment" and fol_target:
-                wm.goals.append(Goal("entailment", fol_target))
-
+            # "according to the premises" entailment fallback
+            elif re.search(r'according to the premises|does it follow', q_text, re.IGNORECASE):
+                wm.goals.append(Goal("entailment", None))
             else:
-                # LLM fallback for unknown task types
-                if self.llm:
-                    llm_out = self.llm.compile_logic_target(q_text, premises_fol)
-                    if llm_out:
-                        t = llm_out.get("task_type", "unknown")
-                        ft = llm_out.get("fol_target")
-                        if ft:
-                            wm.goals.append(Goal("entailment", ft))
-                        elif t == "mcq":
-                            wm.goals.append(Goal("mcq", "__mcq__"))
+                logger.debug(f"QuestionTranslator failed: {trans.source} / {trans.explanation}")
 
-        wm.compilation_method = "structural+ontology" if wm.goals else "failed"
-        wm.compilation_confidence = 1.0 if wm.goals else 0.0
+        method_parts = [trans.source]
+        if wm.goals:
+            method_parts.append("goal_found")
+        wm.compilation_method = "+".join(method_parts)
+        wm.compilation_confidence = trans.confidence
         return wm
 
+    def _extract_mcq_options(self, q_text: str, goal: Goal):
+        """Extract A./B./C./D. options from question text."""
+        lines = q_text.splitlines()
+        for line in lines:
+            line = line.strip()
+            m = re.match(r'^([A-D])\.\s*(.+)', line)
+            if m:
+                opt_id, opt_text = m.group(1), m.group(2).strip()
+                fol_opt = self._canonicalize_option(opt_text)
+                goal.options.append(MCQOption(opt_id, opt_text, fol_opt))
+        # Inline fallback
+        if not goal.options:
+            for m in re.finditer(r'\b([A-D])\.\s*(.+?)(?=\s*[A-D]\.|$)', q_text, re.DOTALL):
+                opt_id, opt_text = m.group(1), m.group(2).strip()
+                fol_opt = self._canonicalize_option(opt_text)
+                goal.options.append(MCQOption(opt_id, opt_text, fol_opt))
+
     def _canonicalize_option(self, option_text: str) -> Optional[str]:
-        """
-        Convert an NL MCQ option to a FOL string using the ontology.
-        Example: "Sophia qualifies for a scholarship" → "qualifies_for_scholarship(Sophia)"
-        """
-        # Check for named entity + predicate phrase
-        # Pattern: "<Proper Noun> <predicate phrase>"
+        """NL MCQ option → FOL string via ontology + implication detection."""
+        # 1. Implication: "If A, then B" / "If A then B"
+        imp_match = re.match(
+            r'[Ii]f\s+(?:a |an |all |the |every )?(.+?),?\s+then\s+(?:it\s+)?(?:is\s+|must\s+be\s+)?(.+)',
+            option_text
+        )
+        if imp_match:
+            antecedent = imp_match.group(1).strip().rstrip(',.')
+            consequent = imp_match.group(2).strip().rstrip('.')
+            pred_a = canonicalize_predicate_phrase(antecedent)
+            pred_c = canonicalize_predicate_phrase(consequent)
+            if pred_a and pred_c:
+                return f"∀x ({pred_a}(x) → {pred_c}(x))"
+            elif pred_a:
+                return f"∀x ({pred_a}(x) → {consequent}(x))"
+            elif pred_c:
+                return f"∀x ({antecedent}(x) → {pred_c}(x))"
+            return None
+
+        # 2. Entity + predicate: "Sophia qualifies for scholarship"
         m = re.match(r'([A-Z][a-z]+)\s+(.+)', option_text)
         if m:
             entity = m.group(1)
             phrase = m.group(2).lower().rstrip('.')
-            pred = PREDICATE_ALIASES.get(phrase)
-            if pred:
+            pred = canonicalize_predicate_phrase(phrase)
+            if pred and not pred.startswith("¬"):
                 return f"{pred}({entity})"
 
-        # Fallback: look for known predicate phrase anywhere
-        for phrase, pred in sorted(PREDICATE_ALIASES.items(),
-                                   key=lambda x: -len(x[0])):
-            if phrase in option_text.lower():
-                # Try to find entity near the phrase
-                m2 = re.search(r'([A-Z][a-z]+)', option_text)
-                entity = m2.group(1) if m2 else "x"
-                return f"{pred}({entity})"
+        # 3. Longest matching predicate phrase
+        pred = canonicalize_predicate_phrase(option_text)
+        if pred and not pred.startswith("¬"):
+            m2 = re.search(r'([A-Z][a-z]+)', option_text)
+            entity = m2.group(1) if m2 else "x"
+            return f"{pred}({entity})"
 
         return None

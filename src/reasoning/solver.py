@@ -99,7 +99,14 @@ class EndToEndOrchestrator:
             )
 
         elif goal.goal_type == "entailment":
-            return self.logic_solver.solve(wm.premises_fol, goal.target)
+            if goal.target:
+                return self.logic_solver.solve(wm.premises_fol, goal.target)
+            else:
+                return ReasoningOutput(
+                    question=q_text, answer="Unknown",
+                    explanation="Entailment goal detected but FOL target could not be derived.",
+                    valid=False, confidence=0.0,
+                )
 
         return ReasoningOutput(
             question=q_text, answer="Unknown",
